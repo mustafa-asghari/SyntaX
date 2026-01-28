@@ -1,0 +1,47 @@
+They are a Third-Party Data Provider. They are completely unaffiliated with X Corp.
+
+Think of them as a "Translator" or a "Middleman." X Corp (Elon Musk) made the official API extremely expensive (starting at $100 for very little data, and up to $5,000–$42,000 per month for enterprise). These guys saw an opportunity to provide the same data to developers who can't afford those prices.
+
+2. What do they actually do? (The "Magic")
+
+On the surface, it looks like they just have a website with a "Search" bar. But underneath, they are doing three very difficult things:
+
+Scraping at Scale: They use a massive "farm" of automated browsers. Instead of asking X for data through the front door (the Official API), they sneak in through the side windows (the public web interface) and "scrape" what a normal user would see.
+
+Bypassing Restrictions: X hates scrapers. To keep working, these guys have to solve CAPTCHAs, rotate thousands of IP addresses (Proxies), and manage "fake" user accounts that act like real people scrolling through feeds.
+
+API Cleaning: X’s raw web data is a mess of HTML and weird codes. Twitterapi.io takes that mess, cleans it up, and turns it into JSON—the clean, structured language that developers use to build apps.
+
+3. Their Business Model (The "Low-Margin, High-Volume" Play)
+
+They aren't looking for one big customer paying $40,000. They want 10,000 developers paying $20.
+
+Pay-As-You-Go: This is their biggest selling point. Official X API requires a monthly subscription. Twitterapi.io lets you pay $0.15 per 1,000 units. If you only need 500 tweets, you only pay a few cents.
+
+Zero Approval: If you use the official API, you have to write an essay to X explaining why you want the data, and they can reject you. These guys don't care. You sign up, get a key, and start coding in 5 minutes.
+
+High Rate Limits: They offer 1,000+ requests per second. The official "Free" or "Basic" X tiers will cut you off after just a few hundred requests.
+
+4. What information are they actually selling?
+
+When a developer calls their API, they are getting:
+
+Tweet Data: Text, timestamps, view counts, likes, retweets.
+
+User Data: Bios, follower counts, profile pictures, and verification status.
+
+Search/Trends: Real-time data on what people are talking about right now.
+
+Historical Data: Looking back at tweets from years ago.
+
+5. Why do people use them? (The Pain Point)
+
+Most of their customers are:
+
+AI Researchers: Training models on social media trends.
+
+Crypto/Trading Bot Creators: Tracking "sentiment" (is everyone happy or mad?) to predict price moves.
+
+Marketing Agencies: Monitoring brand mentions without paying $50k/year to X.
+
+Indie Hackers: Building small apps, like "Tweet Schedulers" or "Analytics Dashboards."
