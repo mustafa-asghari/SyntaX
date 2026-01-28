@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Redis - Token pool, cache, queue
   redis:
@@ -27,12 +25,22 @@ services:
     environment:
       - CLICKHOUSE_DB=syntax
       - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_PASSWORD=Syntax_Api_989@#
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # Scraper service for testing
+  scraper:
+    build: ./scraper
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    profiles:
+      - test
 
 volumes:
   redis_data:
