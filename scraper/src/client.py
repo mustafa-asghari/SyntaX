@@ -62,10 +62,10 @@ class XClient:
     Response times: 50-200ms (vs 2000-5000ms for browser scraping).
     """
 
-    def __init__(self, token_set: Optional[TokenSet] = None):
+    def __init__(self, token_set: Optional[TokenSet] = None, browser: str = "chrome120"):
         self.token_set = token_set
         self._session = None
-        self._browser = random.choice(BROWSER_PROFILES)
+        self._browser = browser
 
     @property
     def session(self) -> requests.Session:
@@ -88,6 +88,8 @@ class XClient:
             "content-type": "application/json",
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
+            "origin": "https://x.com",
+            "referer": "https://x.com/",
             "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
@@ -115,6 +117,7 @@ class XClient:
         variables: Dict[str, Any],
         features: Optional[Dict[str, bool]] = None,
         field_toggles: Optional[Dict[str, bool]] = None,
+        debug: bool = False,
     ) -> Tuple[Dict[str, Any], float]:
         """
         Make a GraphQL request to X API.
@@ -132,17 +135,29 @@ class XClient:
         if field_toggles:
             params["fieldToggles"] = orjson.dumps(field_toggles).decode()
 
+        headers = self._get_headers()
+        cookies = self._get_cookies()
+
+        if debug:
+            print(f"  URL: {url}")
+            print(f"  Headers: {headers}")
+            print(f"  Cookies: {list(cookies.keys())}")
+
         start_time = time.perf_counter()
 
         response = self.session.get(
             url,
             params=params,
-            headers=self._get_headers(),
-            cookies=self._get_cookies(),
+            headers=headers,
+            cookies=cookies,
             timeout=15,
         )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        if debug or response.status_code != 200:
+            print(f"  Status: {response.status_code}")
+            print(f"  Response: {response.text[:500] if response.text else 'empty'}")
 
         response.raise_for_status()
 
@@ -169,17 +184,42 @@ def get_cf_cookie(browser: str = "chrome120") -> Optional[str]:
         response = requests.get(
             X_HOME_URL,
             impersonate=browser,
-            timeout=10,
+            timeout=15,
         )
 
-        for cookie in response.cookies:
-            if cookie.name == "__cf_bm":
-                return cookie.value
+        # curl-cffi cookies is a dict-like object
+        cookies = response.cookies
 
+        # Try different access methods
+        if hasattr(cookies, 'get'):
+            cf_cookie = cookies.get("__cf_bm")
+            if cf_cookie:
+                return cf_cookie
+
+        # Try as dict
+        if isinstance(cookies, dict):
+            return cookies.get("__cf_bm")
+
+        # Try iteration
+        for key in cookies:
+            if key == "__cf_bm":
+                return cookies[key]
+
+        # Check Set-Cookie headers directly
+        set_cookie = response.headers.get("set-cookie", "")
+        if "__cf_bm=" in set_cookie:
+            # Extract value from Set-Cookie header
+            for part in set_cookie.split(";"):
+                if "__cf_bm=" in part:
+                    return part.split("=", 1)[1].strip()
+
+        print(f"No __cf_bm cookie found. Cookies: {dict(cookies) if cookies else 'None'}")
         return None
 
     except Exception as e:
         print(f"Error getting CF cookie: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

@@ -37,7 +37,7 @@ def test_single_user(username: str = "elonmusk"):
     # Step 3: Fetch user
     print(f"\n[3/3] Fetching user @{username}...")
     try:
-        user, elapsed_ms = get_user_by_username(username, client)
+        user, elapsed_ms = get_user_by_username(username, client, debug=True)
 
         if user:
             print(f"\n  SUCCESS! Response time: {elapsed_ms:.0f}ms")

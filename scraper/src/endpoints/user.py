@@ -93,6 +93,7 @@ def parse_user_result(data: Dict[str, Any]) -> Optional[User]:
 def get_user_by_username(
     username: str,
     client: XClient,
+    debug: bool = False,
 ) -> tuple[Optional[User], float]:
     """
     Get user profile by username.
@@ -100,6 +101,7 @@ def get_user_by_username(
     Args:
         username: X username (without @)
         client: XClient instance with token set
+        debug: Print debug info
 
     Returns:
         Tuple of (User or None, response_time_ms)
@@ -119,6 +121,7 @@ def get_user_by_username(
         variables=variables,
         features=FEATURES,
         field_toggles=FIELD_TOGGLES,
+        debug=debug,
     )
 
     user = parse_user_result(data)

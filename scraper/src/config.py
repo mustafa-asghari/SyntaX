@@ -7,10 +7,11 @@ import os
 from typing import Dict, Any
 
 # Bearer token (public, used by X web app)
+# This is the standard guest bearer token from X's web app
 BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
-# Base URLs
-GRAPHQL_BASE_URL = "https://api.x.com/graphql"
+# Base URLs - try both endpoints
+GRAPHQL_BASE_URL = "https://x.com/i/api/graphql"  # Alternative: https://api.x.com/graphql
 GUEST_TOKEN_URL = "https://api.x.com/1.1/guest/activate.json"
 X_HOME_URL = "https://x.com"
 
@@ -86,14 +87,14 @@ TWEET_FEATURES: Dict[str, bool] = {
     "responsive_web_graphql_timeline_navigation_enabled": True,
 }
 
-# Browser impersonation profiles for rotation
+# Browser impersonation profiles for rotation (curl-cffi supported)
 BROWSER_PROFILES = [
     "chrome120",
     "chrome119",
     "chrome116",
     "chrome110",
-    "edge120",
-    "safari17_0",
+    "chrome107",
+    "chrome104",
 ]
 
 # Redis keys
