@@ -5,9 +5,9 @@ Endpoints for searching X tweets.
 
 from typing import Optional, Dict, Any, List
 
-from ..client import XClient
-from ..config import QUERY_IDS, TWEET_FEATURES
-from .tweet import Tweet, _parse_tweet_result
+from client import XClient
+from config import QUERY_IDS, TWEET_FEATURES
+from endpoints.tweet import Tweet, _parse_tweet_result
 
 
 def search_tweets(

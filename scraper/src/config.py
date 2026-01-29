@@ -4,7 +4,14 @@ Contains all constants for X API access including captured query IDs, features, 
 """
 
 import os
+from pathlib import Path
 from typing import Dict, Any
+
+from dotenv import load_dotenv
+
+# Load .env from project root (SyntaX/.env)
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(_env_path)
 
 # Bearer token (public, used by X web app)
 # This is the standard guest bearer token from X's web app

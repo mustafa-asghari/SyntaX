@@ -1,0 +1,82 @@
+# SyntaX Speed Optimization + Guest Token Access + Debugger
+
+## Research Findings
+
+### Guest Token Endpoint Access (tested all of them)
+
+| Endpoint              | Guest Token | Notes                       |
+|-----------------------|-------------|-----------------------------|
+| UserByScreenName      | YES (297ms) | Works perfectly              |
+| UserByRestId          | YES (214ms) | Works perfectly              |
+| TweetByRestId         | YES (258ms) | 200 but often empty result   |
+| TweetDetail           | NO (404)    | Requires auth                |
+| UserTweets            | NO (empty)  | Returns 200 but no tweets    |
+| SearchTimeline        | NO (404)    | Requires auth                |
+| v1.1/statuses/show    | NO (404)    | Killed for guest tokens      |
+| v1.1/search/tweets    | NO (404)    | Killed for guest tokens      |
+| v1.1/user_timeline    | NO (404)    | Killed for guest tokens      |
+| v2/tweets             | NO (403)    | Requires OAuth2              |
+| syndication/timeline  | NO (429)    | Rate limited aggressively    |
+| syndication/tweet     | NO (404)    | Seems killed                 |
+
+**Verdict:** Guest tokens can ONLY access user profiles and individual tweets (sometimes). Timelines, search, and tweet detail all require authenticated cookies (`auth_token` + `ct0`). There is no workaround.
+
+### Current Speed Bottlenecks
+
+1. **TransactionIDGenerator cold start** (~500-800ms) - fetches x.com homepage + ondemand.s JS file on first call
+2. **TLS handshake on first request** (~100-150ms) - curl_cffi session needs to establish TLS on first use
+3. **Guest token creation** (~200-300ms) - separate HTTP call to activate.json
+4. **Per-request overhead** - building headers/cookies dicts, serializing JSON params every call
+5. **No session pre-warming** - session only connects when first request is made
+
+### Achievable Target Speeds (after optimization)
+
+- **First request (cold):** ~800ms → ~300ms (pre-warm session + txn generator in background)
+- **Subsequent requests (warm):** ~300ms → ~150-200ms (connection reuse, pre-built headers, reduced overhead)
+- The hard floor is ~120-150ms which is the network RTT to X's servers
+
+## Implementation Plan
+
+### Step 1: Speed Debugger (`debug.py`)
+Create a detailed timing debugger that prints:
+- TLS handshake time
+- Transaction ID generation time
+- Guest token acquisition time
+- DNS resolution time
+- Request/response time breakdown
+- Total pipeline time
+- Color-coded output (green <100ms, yellow 100-300ms, red >300ms)
+
+### Step 2: Optimize `client.py` for Speed
+- **Pre-warm session** on `XClient.__init__` by setting cookies immediately (triggers TLS handshake)
+- **Cache headers template** instead of rebuilding dict every request
+- **Pre-generate transaction IDs** - generate a batch and cycle through them
+- **Increase txn generator TTL** from 30min to 2 hours (keys don't rotate that fast)
+- **Reuse session across XClient instances** via a module-level session pool
+- **Use `chrome131`** as default (matches modern browsers, better fingerprint)
+
+### Step 3: Optimize `TransactionIDGenerator`
+- **Eager initialization** on module import (in a background thread so it doesn't block)
+- **Cache the homepage soup + ondemand JS** to avoid re-fetching
+- **Pre-generate a batch of transaction IDs** for common endpoints
+
+### Step 4: Optimize `create_token_set()`
+- **Reuse the same session** for guest token activation (avoid new TLS handshake)
+- **Batch token creation** - create multiple tokens in parallel
+
+### Step 5: Update `test_syndication.py` with Speed Debugger
+- Integrate the speed debugger into the test script
+- Show detailed per-phase timing for every request
+- Show comparison: cold vs warm request speeds
+
+### Step 6: Add Auth Cookie Support
+- Add `auth_token` + `ct0` support to `TokenSet` and `XClient`
+- When auth cookies are provided, send them instead of guest token
+- This unlocks: UserTweets, SearchTimeline, TweetDetail
+- Load from environment variables (`X_AUTH_TOKEN`, `X_CT0`)
+
+## Files to Modify
+1. `scraper/src/client.py` - Session pooling, pre-warming, header caching
+2. `scraper/src/config.py` - Increase TTLs
+3. `scraper/src/debug.py` (NEW) - Speed debugger with color output
+4. `scraper/src/test_syndication.py` - Integrate debugger
