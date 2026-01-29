@@ -579,34 +579,6 @@ def create_token_set(
     )
 
 
-def create_auth_token_set(
-    auth_token: Optional[str] = None,
-    ct0: Optional[str] = None,
-) -> Optional[TokenSet]:
-    """
-    Create an authenticated token set using browser cookies.
-
-    Args:
-        auth_token: The auth_token cookie from a logged-in X session.
-        ct0: The ct0 cookie from a logged-in X session.
-
-    If not provided, reads from environment variables X_AUTH_TOKEN and X_CT0.
-    """
-    auth_token = auth_token or os.environ.get("X_AUTH_TOKEN")
-    ct0 = ct0 or os.environ.get("X_CT0")
-
-    if not auth_token or not ct0:
-        return None
-
-    return TokenSet(
-        guest_token="",
-        csrf_token="",
-        created_at=time.time(),
-        auth_token=auth_token,
-        ct0=ct0,
-    )
-
-
 # ── Test ────────────────────────────────────────────────────
 
 def test_connection() -> bool:
