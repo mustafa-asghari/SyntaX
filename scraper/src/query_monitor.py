@@ -12,11 +12,11 @@ from typing import Dict, Optional
 from curl_cffi import requests
 import redis
 
-from .config import (
+from config import (
     X_HOME_URL,
     BROWSER_PROFILES,
     REDIS_KEYS,
-    get_redis_url,
+    get_redis_url,  
 )
 
 

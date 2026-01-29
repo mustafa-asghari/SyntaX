@@ -40,6 +40,7 @@ def test_api_x_com():
     url = "https://api.x.com/1.1/guest/activate.json"
 
     print(f"\nTesting guest token endpoint: {url}")
+    
 
     bearer = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
@@ -67,11 +68,11 @@ def test_graphql_endpoint():
     # Get CF cookie first
     print("\n1. Getting CF cookie from x.com...")
     resp = requests.get("https://x.com", impersonate="chrome120", timeout=15)
-    cf_cookie = None
-    for key in resp.cookies:
-        if key == "__cf_bm":
-            cf_cookie = resp.cookies[key]
-            break
+    cf_cookie = "__cf_bm=iDIlp4sRHmE8LzuktDnSXBHrjNNSjzK2.14syrjGHx8-1769596705.8617947-1.0.1.1-lVJxFSqr5K1wwCSG2a8vebCZ4xJ_QK47iMWH.QiFyvSM8D3OcAtfAmgZhAQ7UxuOZDsvCgntPM3t25HzIw2OHjhrUc1yMutg9xG8vUb35pFTcQl9zctCicbicZfwroeF; HttpOnly; Secure; Path=/; Domain=x.com; Expires=Wed, 28 Jan 2026 11:08:26 GMT"
+    # for key in resp.cookies:
+    #     if key == "__cf_bm":
+    #         cf_cookie = resp.cookies[key]
+    #         break
     print(f"   CF Cookie: {cf_cookie[:30] if cf_cookie else 'None'}...")
 
     # Get guest token
