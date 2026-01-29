@@ -268,31 +268,46 @@ def _parse_timeline_response(data: Dict[str, Any]) -> tuple[List[Tweet], Optiona
     next_cursor = None
 
     user_result = data.get("data", {}).get("user", {}).get("result", {})
-    # Handle both timeline_v2 (old) and timeline (new) response formats
+    # Handle both response formats:
+    #   old: user_result.timeline_v2.timeline.instructions
+    #   new: user_result.timeline.timeline.instructions (double-nested)
     timeline = (
         user_result.get("timeline_v2", {}).get("timeline", {})
-        or user_result.get("timeline", {})
+        or user_result.get("timeline", {}).get("timeline", {})
     )
 
     for instruction in timeline.get("instructions", []):
-        entries = instruction.get("entries", [])
-        for entry in entries:
-            content = entry.get("content", {})
+        itype = instruction.get("type", "")
 
-            # Tweet entry
-            if content.get("entryType") == "TimelineTimelineItem":
-                result = (
-                    content.get("itemContent", {})
-                    .get("tweet_results", {})
-                    .get("result", {})
-                )
-                tweet = _parse_tweet_result(result)
-                if tweet:
-                    tweets.append(tweet)
+        # Standard entries (TimelineAddEntries)
+        if itype == "TimelineAddEntries":
+            for entry in instruction.get("entries", []):
+                _parse_timeline_entry(entry, tweets)
+                # Check for cursor
+                content = entry.get("content", {})
+                if content.get("entryType") == "TimelineTimelineCursor":
+                    if content.get("cursorType") == "Bottom":
+                        next_cursor = content.get("value")
 
-            # Cursor entry
-            elif content.get("entryType") == "TimelineTimelineCursor":
-                if content.get("cursorType") == "Bottom":
-                    next_cursor = content.get("value")
+        # Pinned tweet (TimelinePinEntry)
+        elif itype == "TimelinePinEntry":
+            entry = instruction.get("entry", {})
+            _parse_timeline_entry(entry, tweets)
 
     return tweets, next_cursor
+
+
+def _parse_timeline_entry(entry: Dict[str, Any], tweets: List[Tweet]):
+    """Parse a single timeline entry and append any tweets found."""
+    content = entry.get("content", {})
+    entry_type = content.get("entryType", "")
+
+    if entry_type == "TimelineTimelineItem":
+        result = (
+            content.get("itemContent", {})
+            .get("tweet_results", {})
+            .get("result", {})
+        )
+        tweet = _parse_tweet_result(result)
+        if tweet:
+            tweets.append(tweet)
