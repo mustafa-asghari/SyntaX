@@ -1,0 +1,298 @@
+"""
+SyntaX Tweet Endpoints
+Endpoints for fetching X tweet data.
+"""
+
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass, field
+
+from client import XClient
+from config import QUERY_IDS, TWEET_FEATURES, FIELD_TOGGLES
+
+
+@dataclass
+class Tweet:
+    """Parsed X tweet data."""
+    id: str
+    text: str
+    created_at: str
+    author_id: str
+    author_username: str
+    author_name: str
+    retweet_count: int
+    like_count: int
+    reply_count: int
+    quote_count: int
+    view_count: int
+    bookmark_count: int
+    language: str
+    is_reply: bool
+    is_retweet: bool
+    is_quote: bool
+    media: List[Dict[str, Any]] = field(default_factory=list)
+    urls: List[Dict[str, str]] = field(default_factory=list)
+    raw_json: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "text": self.text,
+            "created_at": self.created_at,
+            "author_id": self.author_id,
+            "author_username": self.author_username,
+            "author_name": self.author_name,
+            "retweet_count": self.retweet_count,
+            "like_count": self.like_count,
+            "reply_count": self.reply_count,
+            "quote_count": self.quote_count,
+            "view_count": self.view_count,
+            "bookmark_count": self.bookmark_count,
+            "language": self.language,
+            "is_reply": self.is_reply,
+            "is_retweet": self.is_retweet,
+            "is_quote": self.is_quote,
+            "media": self.media,
+            "urls": self.urls,
+        }
+
+
+def _parse_tweet_result(result: Dict[str, Any]) -> Optional[Tweet]:
+    """Parse a single tweet result object."""
+    try:
+        if not result or result.get("__typename") == "TweetUnavailable":
+            return None
+
+        # Handle TweetWithVisibilityResults wrapper
+        if result.get("__typename") == "TweetWithVisibilityResults":
+            result = result.get("tweet", result)
+
+        legacy = result.get("legacy", {})
+        core = result.get("core", {}).get("user_results", {}).get("result", {})
+        user_core = core.get("core", {})
+        user_legacy = core.get("legacy", {})
+
+        # Extract metrics
+        metrics = legacy.get("extended_entities", {})
+        view_count_info = result.get("views", {})
+
+        # Extract media
+        media_list = []
+        for m in legacy.get("extended_entities", {}).get("media", []):
+            media_item = {
+                "type": m.get("type", "photo"),
+                "url": m.get("media_url_https", ""),
+                "expanded_url": m.get("expanded_url", ""),
+            }
+            if m.get("type") == "video" or m.get("type") == "animated_gif":
+                variants = m.get("video_info", {}).get("variants", [])
+                mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+                if mp4s:
+                    best = max(mp4s, key=lambda v: v.get("bitrate", 0))
+                    media_item["video_url"] = best.get("url", "")
+            media_list.append(media_item)
+
+        # Extract URLs
+        url_list = []
+        for u in legacy.get("entities", {}).get("urls", []):
+            url_list.append({
+                "url": u.get("expanded_url", u.get("url", "")),
+                "display_url": u.get("display_url", ""),
+            })
+
+        return Tweet(
+            id=legacy.get("id_str", result.get("rest_id", "")),
+            text=legacy.get("full_text", ""),
+            created_at=legacy.get("created_at", ""),
+            author_id=legacy.get("user_id_str", core.get("rest_id", "")),
+            author_username=user_core.get("screen_name") or user_legacy.get("screen_name", ""),
+            author_name=user_core.get("name") or user_legacy.get("name", ""),
+            retweet_count=legacy.get("retweet_count", 0),
+            like_count=legacy.get("favorite_count", 0),
+            reply_count=legacy.get("reply_count", 0),
+            quote_count=legacy.get("quote_count", 0),
+            view_count=int(view_count_info.get("count", 0)) if view_count_info.get("count") else 0,
+            bookmark_count=legacy.get("bookmark_count", 0),
+            language=legacy.get("lang", ""),
+            is_reply=bool(legacy.get("in_reply_to_status_id_str")),
+            is_retweet=bool(legacy.get("retweeted_status_result")),
+            is_quote=legacy.get("is_quote_status", False),
+            media=media_list,
+            urls=url_list,
+            raw_json=result,
+        )
+
+    except Exception as e:
+        print(f"Error parsing tweet: {e}")
+        return None
+
+
+def get_tweet_by_id(
+    tweet_id: str,
+    client: XClient,
+    debug: bool = False,
+) -> tuple[Optional[Tweet], float]:
+    """Get a single tweet by its ID."""
+    query_id = QUERY_IDS.get("TweetResultByRestId")
+    if not query_id:
+        raise ValueError("TweetResultByRestId query ID not configured")
+
+    variables = {
+        "tweetId": tweet_id,
+        "withCommunity": False,
+        "includePromotedContent": False,
+        "withVoice": False,
+    }
+
+    data, elapsed_ms = client.graphql_request(
+        query_id=query_id,
+        operation_name="TweetResultByRestId",
+        variables=variables,
+        features=TWEET_FEATURES,
+        debug=debug,
+    )
+
+    result = data.get("data", {}).get("tweetResult", {}).get("result", {})
+    tweet = _parse_tweet_result(result)
+    return tweet, elapsed_ms
+
+
+def get_tweet_detail(
+    tweet_id: str,
+    client: XClient,
+    debug: bool = False,
+) -> tuple[Optional[Tweet], List[Tweet], float]:
+    """
+    Get tweet detail with conversation thread.
+
+    Returns:
+        Tuple of (main_tweet, reply_tweets, response_time_ms)
+    """
+    query_id = QUERY_IDS.get("TweetDetail")
+    if not query_id:
+        raise ValueError("TweetDetail query ID not configured")
+
+    variables = {
+        "focalTweetId": tweet_id,
+        "with_rux_injections": False,
+        "rankingMode": "Relevance",
+        "includePromotedContent": False,
+        "withCommunity": True,
+        "withQuickPromoteEligibilityTweetFields": False,
+        "withBirdwatchNotes": True,
+        "withVoice": True,
+    }
+
+    data, elapsed_ms = client.graphql_request(
+        query_id=query_id,
+        operation_name="TweetDetail",
+        variables=variables,
+        features=TWEET_FEATURES,
+        field_toggles={"withArticlePlainText": False},
+        debug=debug,
+    )
+
+    # Parse conversation thread
+    main_tweet = None
+    replies = []
+
+    instructions = (
+        data.get("data", {})
+        .get("threaded_conversation_with_injections_v2", {})
+        .get("instructions", [])
+    )
+
+    for instruction in instructions:
+        if instruction.get("type") != "TimelineAddEntries":
+            continue
+        for entry in instruction.get("entries", []):
+            content = entry.get("content", {})
+            if content.get("entryType") == "TimelineTimelineItem":
+                result = (
+                    content.get("itemContent", {})
+                    .get("tweet_results", {})
+                    .get("result", {})
+                )
+                tweet = _parse_tweet_result(result)
+                if tweet:
+                    if tweet.id == tweet_id:
+                        main_tweet = tweet
+                    else:
+                        replies.append(tweet)
+
+    return main_tweet, replies, elapsed_ms
+
+
+def get_user_tweets(
+    user_id: str,
+    client: XClient,
+    count: int = 20,
+    cursor: Optional[str] = None,
+    debug: bool = False,
+) -> tuple[List[Tweet], Optional[str], float]:
+    """
+    Get tweets from a user's timeline.
+
+    Returns:
+        Tuple of (tweets, next_cursor, response_time_ms)
+    """
+    query_id = QUERY_IDS.get("UserTweets")
+    if not query_id:
+        raise ValueError("UserTweets query ID not configured")
+
+    variables = {
+        "userId": user_id,
+        "count": count,
+        "includePromotedContent": False,
+        "withQuickPromoteEligibilityTweetFields": False,
+        "withVoice": True,
+        "withV2Timeline": True,
+    }
+    if cursor:
+        variables["cursor"] = cursor
+
+    data, elapsed_ms = client.graphql_request(
+        query_id=query_id,
+        operation_name="UserTweets",
+        variables=variables,
+        features=TWEET_FEATURES,
+        debug=debug,
+    )
+
+    tweets, next_cursor = _parse_timeline_response(data)
+    return tweets, next_cursor, elapsed_ms
+
+
+def _parse_timeline_response(data: Dict[str, Any]) -> tuple[List[Tweet], Optional[str]]:
+    """Parse a timeline response into tweets and cursor."""
+    tweets = []
+    next_cursor = None
+
+    user_result = data.get("data", {}).get("user", {}).get("result", {})
+    # Handle both timeline_v2 (old) and timeline (new) response formats
+    timeline = (
+        user_result.get("timeline_v2", {}).get("timeline", {})
+        or user_result.get("timeline", {})
+    )
+
+    for instruction in timeline.get("instructions", []):
+        entries = instruction.get("entries", [])
+        for entry in entries:
+            content = entry.get("content", {})
+
+            # Tweet entry
+            if content.get("entryType") == "TimelineTimelineItem":
+                result = (
+                    content.get("itemContent", {})
+                    .get("tweet_results", {})
+                    .get("result", {})
+                )
+                tweet = _parse_tweet_result(result)
+                if tweet:
+                    tweets.append(tweet)
+
+            # Cursor entry
+            elif content.get("entryType") == "TimelineTimelineCursor":
+                if content.get("cursorType") == "Bottom":
+                    next_cursor = content.get("value")
+
+    return tweets, next_cursor

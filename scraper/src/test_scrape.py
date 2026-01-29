@@ -6,8 +6,8 @@ Test the scraper to make sure everything works.
 import time
 import sys
 
-from .client import create_token_set, XClient
-from .endpoints.user import get_user_by_username
+from client import create_token_set, XClient
+from endpoints.user import get_user_by_username
 
 
 def test_single_user(username: str = "elonmusk"):
@@ -28,7 +28,7 @@ def test_single_user(username: str = "elonmusk"):
 
     print(f"  Token created in {token_time:.0f}ms")
     print(f"  Guest token: {token_set.guest_token}")
-    print(f"  CF cookie: {token_set.cf_cookie[:30]}...")
+    #print(f"  CF cookie: {token_set.cf_cookie[:30]}...")
 
     # Step 2: Create client
     print(f"\n[2/3] Creating client...")

@@ -57,10 +57,10 @@ class TokenPool:
         self.redis_client.hset(
             self._token_key(token_id),
             mapping={
-                "cf_cookie": token_set.cf_cookie,
                 "guest_token": token_set.guest_token,
                 "csrf_token": token_set.csrf_token,
                 "created_at": str(token_set.created_at),
+                "cf_cookie": token_set.cf_cookie or "",
                 "request_count": str(token_set.request_count),
             }
         )
@@ -98,16 +98,16 @@ class TokenPool:
             return None
 
         token_set = TokenSet(
-            cf_cookie=data["cf_cookie"],
             guest_token=data["guest_token"],
             csrf_token=data["csrf_token"],
             created_at=float(data["created_at"]),
+            cf_cookie=data.get("cf_cookie") or None,
             request_count=int(data.get("request_count", 0)),
         )
 
-        # Check if CF cookie is still valid
-        cf_age = time.time() - token_set.created_at
-        if cf_age > TOKEN_CONFIG["cf_cookie_ttl"]:
+        # Check if token is still valid
+        age = time.time() - token_set.created_at
+        if age > TOKEN_CONFIG["guest_token_ttl"]:
             # Token expired, don't return it
             self.redis_client.delete(self._token_key(token_id))
             return self.get_token()  # Try next token
@@ -123,8 +123,8 @@ class TokenPool:
         token_id = f"{int(token_set.created_at * 1000)}"
 
         # Check if token is still valid
-        cf_age = time.time() - token_set.created_at
-        if cf_age > TOKEN_CONFIG["cf_cookie_ttl"]:
+        age = time.time() - token_set.created_at
+        if age > TOKEN_CONFIG["guest_token_ttl"]:
             # Expired, don't return
             self.redis_client.delete(self._token_key(token_id))
             return
@@ -141,7 +141,7 @@ class TokenPool:
             base_score -= 0.2
 
         # Penalize older tokens
-        age_penalty = cf_age / TOKEN_CONFIG["cf_cookie_ttl"] * 0.3
+        age_penalty = age / TOKEN_CONFIG["guest_token_ttl"] * 0.3
         health_score = max(0.1, base_score - age_penalty)
 
         # Update token data

@@ -6,8 +6,8 @@ Endpoints for fetching X user data.
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-from ..client import XClient, TokenSet
-from ..config import QUERY_IDS, FEATURES, FIELD_TOGGLES
+from client import XClient, TokenSet
+from config import QUERY_IDS, FEATURES, FIELD_TOGGLES
 
 
 @dataclass
@@ -60,16 +60,27 @@ def parse_user_result(data: Dict[str, Any]) -> Optional[User]:
             return None
 
         legacy = result.get("legacy", {})
+        core = result.get("core", {})
 
         # Extract entities for URL
         entities = legacy.get("entities", {})
         url_entities = entities.get("url", {}).get("urls", [])
         website = url_entities[0].get("expanded_url", "") if url_entities else ""
 
+        # screen_name/name can be in core (new format) or legacy (old format)
+        username = core.get("screen_name") or legacy.get("screen_name", "")
+        name = core.get("name") or legacy.get("name", "")
+        created_at = core.get("created_at") or legacy.get("created_at", "")
+
+        # Profile image can be in avatar (new) or legacy (old)
+        avatar = result.get("avatar", {})
+        profile_image = avatar.get("image_url") or legacy.get("profile_image_url_https", "")
+        profile_image = profile_image.replace("_normal", "_400x400")
+
         return User(
             id=result.get("rest_id", ""),
-            username=legacy.get("screen_name", ""),
-            name=legacy.get("name", ""),
+            username=username,
+            name=name,
             bio=legacy.get("description", ""),
             location=legacy.get("location", ""),
             website=website,
@@ -77,10 +88,10 @@ def parse_user_result(data: Dict[str, Any]) -> Optional[User]:
             following_count=legacy.get("friends_count", 0),
             tweet_count=legacy.get("statuses_count", 0),
             listed_count=legacy.get("listed_count", 0),
-            created_at=legacy.get("created_at", ""),
+            created_at=created_at,
             is_verified=legacy.get("verified", False),
             is_blue_verified=result.get("is_blue_verified", False),
-            profile_image_url=legacy.get("profile_image_url_https", "").replace("_normal", "_400x400"),
+            profile_image_url=profile_image,
             banner_url=legacy.get("profile_banner_url"),
             raw_json=data,
         )

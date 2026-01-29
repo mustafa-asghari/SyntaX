@@ -11,34 +11,31 @@ from typing import Dict, Any
 BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
 # Base URLs - try both endpoints
-GRAPHQL_BASE_URL = "https://x.com/i/api/graphql"  # Alternative: https://api.x.com/graphql
+GRAPHQL_BASE_URL = "https://api.x.com/graphql"
 GUEST_TOKEN_URL = "https://api.x.com/1.1/guest/activate.json"
 X_HOME_URL = "https://x.com"
 
 # Query IDs (captured from X's bundles - auto-updated by query_monitor)
 QUERY_IDS: Dict[str, str] = {
     # User endpoints
-    "UserByScreenName": "-oaLodhGbbnzJBACb1kk2Q",  # Captured!
-    "UserByRestId": "",  # To be discovered
-    "UserTweets": "",
-    "UserTweetsAndReplies": "",
-    "UserMedia": "",
-    "Likes": "",
-    "Followers": "",
-    "Following": "",
+    "UserByScreenName": "-oaLodhGbbnzJBACb1kk2Q",
+    "UserByRestId": "Bbaot8ySMtJD7K2t01gW7A",
+    "UserTweets": "a3SQAz_VP9k8VWDr9bMcXQ",
+    "UserTweetsAndReplies": "NullQbZlUJl-u6oBYRdrVw",
+    "UserMedia": "8HCIrWwy4C0fBTbPnMq5aA",
+    "Likes": "fuBEtiFu3uQFuPDTsv4bfg",
+    "Followers": "oQWxG6XdR5SPvMBsPiKUPQ",
+    "Following": "i2GOldCH2D3OUEhAdimLrA",
 
     # Tweet endpoints
-    "TweetResultByRestId": "",
-    "TweetDetail": "",
+    "TweetResultByRestId": "0aTrQMKgj95K791yXeNDRA",
+    "TweetDetail": "Kzfv17rukSzjT96BerOWZA",
 
     # Search
-    "SearchTimeline": "",
-
-    # Trends
-    "TrendsList": "",
+    "SearchTimeline": "f_A-Gyo204PRxixpkrchJg",
 
     # Lists
-    "ListLatestTweetsTimeline": "",
+    "ListLatestTweetsTimeline": "haIYNjPwpisz8wMc42vWpQ",
 }
 
 # Features object (required for all GraphQL requests)
@@ -68,6 +65,7 @@ FIELD_TOGGLES: Dict[str, bool] = {
 TWEET_FEATURES: Dict[str, bool] = {
     **FEATURES,
     "rweb_video_timestamps_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
     "longform_notetweets_richtext_consumption_enabled": True,
     "longform_notetweets_inline_media_enabled": True,
     "responsive_web_enhance_cards_enabled": False,
@@ -81,20 +79,36 @@ TWEET_FEATURES: Dict[str, bool] = {
     "interactive_text_enabled": True,
     "responsive_web_text_conversations_enabled": False,
     "responsive_web_twitter_blue_verified_badge_is_enabled": True,
-    "verified_phone_label_enabled": False,
     "vibe_api_enabled": True,
     "responsive_web_graphql_exclude_directive_enabled": True,
-    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_jetfuel_frame": False,
+    "responsive_web_grok_show_grok_translated_post": False,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "responsive_web_grok_annotations_enabled": True,
+    "post_ctas_fetch_enabled": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "articles_preview_enabled": True,
+    "responsive_web_grok_analyze_post_followups_enabled": False,
+    "responsive_web_grok_analysis_button_from_backend": False,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+    "responsive_web_grok_share_attachment_enabled": False,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "creator_subscriptions_quote_tweet_preview_enabled": True,
+    "premium_content_api_read_enabled": False,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "tweet_awards_web_tipping_enabled": False,
+    "responsive_web_grok_imagine_annotation_enabled": False,
+    "rweb_video_screen_enabled": False,
 }
 
 # Browser impersonation profiles for rotation (curl-cffi supported)
 BROWSER_PROFILES = [
+    "chrome131",
+    "chrome124",
+    "chrome123",
     "chrome120",
-    "chrome119",
-    "chrome116",
-    "chrome110",
-    "chrome107",
-    "chrome104",
 ]
 
 # Redis keys

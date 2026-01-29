@@ -6,45 +6,28 @@ High-performance X/Twitter data API.
 import os
 import sys
 import time
-from typing import Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Depends, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import redis
 
 # Add scraper to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper'))
 
 from src.client import XClient, create_token_set
-from src.token_pool import TokenPool, get_pool
-from src.endpoints.user import get_user_by_username, User
+from src.token_pool import TokenPool
+from src.endpoints.user import get_user_by_username, get_user_by_id
+from src.endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
+from src.endpoints.search import search_tweets
 
 
 # Response models
-class UserResponse(BaseModel):
-    id: str
-    username: str
-    name: str
-    bio: str
-    location: str
-    website: str
-    followers_count: int
-    following_count: int
-    tweet_count: int
-    listed_count: int
-    created_at: str
-    is_verified: bool
-    is_blue_verified: bool
-    profile_image_url: str
-    banner_url: Optional[str] = None
-
-
 class APIResponse(BaseModel):
     success: bool
-    data: Optional[dict] = None
+    data: Optional[dict | list] = None
     error: Optional[str] = None
     meta: dict = {}
 
@@ -53,19 +36,28 @@ class APIResponse(BaseModel):
 pool: Optional[TokenPool] = None
 
 
+def _get_client():
+    """Get an XClient with a token from the pool or on-demand."""
+    token_set = pool.get_token() if pool else None
+
+    if not token_set:
+        token_set = create_token_set()
+        if not token_set:
+            raise HTTPException(status_code=503, detail="Unable to create authentication token")
+
+    return XClient(token_set=token_set), token_set
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     global pool
 
-    # Startup
     print("Starting SyntaX API...")
 
-    # Initialize token pool
     pool = TokenPool()
     print(f"Token pool initialized (size: {pool.pool_size()})")
 
-    # If pool is empty, create some tokens
     if pool.pool_size() == 0:
         print("Pool empty, creating initial tokens...")
         for i in range(5):
@@ -77,13 +69,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     print("Shutting down SyntaX API...")
     if pool:
         pool.close()
 
 
-# Create app
 app = FastAPI(
     title="SyntaX API",
     description="High-performance X/Twitter data API. 10x faster than competitors.",
@@ -92,7 +82,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -104,7 +93,6 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    """API root."""
     return {
         "name": "SyntaX API",
         "version": "0.1.0",
@@ -115,78 +103,225 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check."""
     return {
         "status": "healthy",
         "pool_size": pool.pool_size() if pool else 0,
     }
 
 
+# ── User Endpoints ──────────────────────────────────────────
+
+
 @app.get("/v1/users/{username}", response_model=APIResponse)
-async def get_user(
-    username: str,
-    request: Request,
-):
-    """
-    Get user profile by username.
-
-    Returns user data including followers, following, bio, etc.
-    """
+async def get_user(username: str):
+    """Get user profile by username."""
     start_time = time.perf_counter()
-
-    # Get token from pool
-    token_set = pool.get_token() if pool else None
-
-    if not token_set:
-        # Create token on-demand (slower, but works)
-        token_set = create_token_set()
-        if not token_set:
-            raise HTTPException(
-                status_code=503,
-                detail="Unable to create authentication token"
-            )
+    client, token_set = _get_client()
 
     try:
-        # Create client and fetch user
-        client = XClient(token_set=token_set)
         user, api_time = get_user_by_username(username, client)
         client.close()
-
         total_time = (time.perf_counter() - start_time) * 1000
 
-        if user:
-            # Return token to pool
-            if pool:
-                pool.return_token(token_set, success=True)
+        if pool:
+            pool.return_token(token_set, success=True)
 
-            return APIResponse(
-                success=True,
-                data=user.to_dict(),
-                meta={
-                    "response_time_ms": round(total_time, 1),
-                    "x_api_time_ms": round(api_time, 1),
-                }
-            )
-        else:
-            if pool:
-                pool.return_token(token_set, success=True)
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User @{username} not found")
 
-            raise HTTPException(
-                status_code=404,
-                detail=f"User @{username} not found"
-            )
+        return APIResponse(
+            success=True,
+            data=user.to_dict(),
+            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        # Return token with failure flag
         if pool:
             pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
+
+@app.get("/v1/users/id/{user_id}", response_model=APIResponse)
+async def get_user_by_rest_id(user_id: str):
+    """Get user profile by numeric user ID."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        user, api_time = get_user_by_id(user_id, client)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+
+        return APIResponse(
+            success=True,
+            data=user.to_dict(),
+            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
         )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Tweet Endpoints ─────────────────────────────────────────
+
+
+@app.get("/v1/tweets/{tweet_id}", response_model=APIResponse)
+async def get_tweet(tweet_id: str):
+    """Get a single tweet by ID."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        tweet, api_time = get_tweet_by_id(tweet_id, client)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        if not tweet:
+            raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
+
+        return APIResponse(
+            success=True,
+            data=tweet.to_dict(),
+            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/tweets/{tweet_id}/detail", response_model=APIResponse)
+async def get_tweet_with_replies(tweet_id: str):
+    """Get tweet detail with conversation thread."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        main_tweet, replies, api_time = get_tweet_detail(tweet_id, client)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        if not main_tweet:
+            raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
+
+        return APIResponse(
+            success=True,
+            data={
+                "tweet": main_tweet.to_dict(),
+                "replies": [r.to_dict() for r in replies],
+                "reply_count": len(replies),
+            },
+            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/users/{user_id}/tweets", response_model=APIResponse)
+async def get_tweets_by_user(
+    user_id: str,
+    count: int = Query(default=20, le=40),
+    cursor: Optional[str] = Query(default=None),
+):
+    """Get tweets from a user's timeline. Requires numeric user_id."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        tweets, next_cursor, api_time = get_user_tweets(user_id, client, count=count, cursor=cursor)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        return APIResponse(
+            success=True,
+            data=[t.to_dict() for t in tweets],
+            meta={
+                "response_time_ms": round(total_time, 1),
+                "x_api_time_ms": round(api_time, 1),
+                "count": len(tweets),
+                "next_cursor": next_cursor,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Search Endpoints ────────────────────────────────────────
+
+
+@app.get("/v1/search", response_model=APIResponse)
+async def search(
+    q: str = Query(..., description="Search query"),
+    count: int = Query(default=20, le=40),
+    product: str = Query(default="Top", description="Top, Latest, People, Photos, Videos"),
+    cursor: Optional[str] = Query(default=None),
+):
+    """Search for tweets."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        tweets, next_cursor, api_time = search_tweets(q, client, count=count, product=product, cursor=cursor)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        return APIResponse(
+            success=True,
+            data=[t.to_dict() for t in tweets],
+            meta={
+                "response_time_ms": round(total_time, 1),
+                "x_api_time_ms": round(api_time, 1),
+                "count": len(tweets),
+                "next_cursor": next_cursor,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Admin Endpoints ─────────────────────────────────────────
 
 
 @app.get("/v1/pool/stats")
@@ -194,16 +329,10 @@ async def pool_stats():
     """Get token pool statistics."""
     if not pool:
         return {"error": "Pool not initialized"}
-
     return pool.pool_stats()
 
 
 # Run with: uvicorn api.src.main:app --reload
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

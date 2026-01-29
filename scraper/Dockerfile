@@ -2,9 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for curl-cffi
+# Install system dependencies for curl-cffi and lxml
 RUN apt-get update && apt-get install -y \
     curl \
+    libxml2-dev \
+    libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for caching

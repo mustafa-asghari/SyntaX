@@ -1,0 +1,122 @@
+Request URL
+https://api.x.com/graphql/-oaLodhGbbnzJBACb1kk2Q/UserByScreenName?variables=%7B%22screen_name%22%3A%22alexocheema%22%2C%22withGrokTranslatedBio%22%3Afalse%7D&features=%7B%22hidden_profile_subscriptions_enabled%22%3Atrue%2C%22profile_label_improvements_pcf_label_in_post_enabled%22%3Atrue%2C%22responsive_web_profile_redirect_enabled%22%3Afalse%2C%22rweb_tipjar_consumption_enabled%22%3Afalse%2C%22verified_phone_label_enabled%22%3Afalse%2C%22subscriptions_verification_info_is_identity_verified_enabled%22%3Atrue%2C%22subscriptions_verification_info_verified_since_enabled%22%3Atrue%2C%22highlights_tweets_tab_ui_enabled%22%3Atrue%2C%22responsive_web_twitter_article_notes_tab_enabled%22%3Atrue%2C%22subscriptions_feature_can_gift_premium%22%3Atrue%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%7D&fieldToggles=%7B%22withPayments%22%3Afalse%2C%22withAuxiliaryUserLabels%22%3Atrue%7D
+Request Method
+GET
+Status Code
+200 OK
+Remote Address
+[2405:6e00:64::a29f:8ce5]:443
+Referrer Policy
+strict-origin-when-cross-origin
+access-control-allow-credentials
+true
+access-control-allow-origin
+https://x.com
+access-control-expose-headers
+Backoff-Policy,Content-Length,X-TD-Mtime,X-Acted-As-User-Id,X-Rate-Limit-Limit,X-Rate-Limit-Remaining,X-Rate-Limit-Reset,X-Response-Time,X-Transaction-Id,X-Twitter-Client,X-Twitter-Client-Version,X-Twitter-Diffy-Request-Key,X-Twitter-Polling,X-Twitter-Spotify-Access-Token,X-Twitter-UTCOffset
+cache-control
+no-cache, no-store, must-revalidate, pre-check=0, post-check=0
+cf-cache-status
+DYNAMIC
+cf-ray
+9c5677de5e90a959-SYD
+content-disposition
+attachment; filename=json.json
+content-encoding
+gzip
+content-length
+1405
+content-type
+application/json; charset=utf-8
+date
+Thu, 29 Jan 2026 05:53:16 GMT
+expires
+Tue, 31 Mar 1981 05:00:00 GMT
+last-modified
+Thu, 29 Jan 2026 05:53:16 GMT
+origin-cf-ray
+9c5677de5e90a959-SYD
+perf
+7402827104
+pragma
+no-cache
+server
+cloudflare envoy
+set-cookie
+__cf_bm=8YC7A7_BYmeUrjly_v9h4ZTZ3WX8oY3L2hl3UgRdbNA-1769665996.5332282-1.0.1.1-QujfHJ388FIH3hNjQk_YDaz.SPB1e53pzWK3iF6J8S8fO4gbwGNTE2PoLyNK794IVFRJ7VR_kiWFVZik4WyJe7xrPtZyn_qPLtfTl2XPoYq5o6tvJmvKU8rH5E19sa70; HttpOnly; Secure; Path=/; Domain=x.com; Expires=Thu, 29 Jan 2026 06:23:16 GMT
+strict-transport-security
+max-age=631138519; includeSubdomains
+vary
+Origin
+vary
+accept-encoding
+x-content-type-options
+nosniff
+x-frame-options
+SAMEORIGIN
+x-rate-limit-limit
+150
+x-rate-limit-remaining
+149
+x-rate-limit-reset
+1769666896
+x-response-time
+52
+x-served-by
+t4_p
+x-tfe-preserve-body
+true
+x-transaction-id
+2f373480c5cd3153
+x-twitter-response-tags
+BouncerCompliant
+x-xss-protection
+0
+:authority
+api.x.com
+:method
+GET
+:path
+/graphql/-oaLodhGbbnzJBACb1kk2Q/UserByScreenName?variables=%7B%22screen_name%22%3A%22alexocheema%22%2C%22withGrokTranslatedBio%22%3Afalse%7D&features=%7B%22hidden_profile_subscriptions_enabled%22%3Atrue%2C%22profile_label_improvements_pcf_label_in_post_enabled%22%3Atrue%2C%22responsive_web_profile_redirect_enabled%22%3Afalse%2C%22rweb_tipjar_consumption_enabled%22%3Afalse%2C%22verified_phone_label_enabled%22%3Afalse%2C%22subscriptions_verification_info_is_identity_verified_enabled%22%3Atrue%2C%22subscriptions_verification_info_verified_since_enabled%22%3Atrue%2C%22highlights_tweets_tab_ui_enabled%22%3Atrue%2C%22responsive_web_twitter_article_notes_tab_enabled%22%3Atrue%2C%22subscriptions_feature_can_gift_premium%22%3Atrue%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%7D&fieldToggles=%7B%22withPayments%22%3Afalse%2C%22withAuxiliaryUserLabels%22%3Atrue%7D
+:scheme
+https
+accept
+*/*
+accept-encoding
+gzip, deflate, br, zstd
+accept-language
+en-GB,en-US;q=0.9,en;q=0.8
+authorization
+Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA
+content-type
+application/json
+cookie
+__cuid=fa824383a1f44b95bec464a195ba2c25; kdt=D8oYjGH8lUYKHxlllkxL5wQKhQSiICJsRYspP8Sn; dnt=1; guest_id=v1%3A176959403620462982; guest_id_marketing=v1%3A176959403620462982; guest_id_ads=v1%3A176959403620462982; att=1-AnsCUQehN1KNItoaW0nMQA3sFRlUGjhCpWm4ToOl; gt=2016751428644327622; personalization_id="v1_q9wfLQArF7wEYlZTBTINsA=="; __cf_bm=ZlLn71.4s7EL7rpHmgECaWXojowNHSxz6HYtsk49Nps-1769665996.0832572-1.0.1.1-Hus63grLKDCN.2cUd3W8ATL87948_gaCk5GWPNn_IZ.ycnSnEYMCqhRRFfAsyp_iAjuWl0KUmN94gJNV7GCHpxLvuA8iLK.DH_EjtFg1iD0n6ntz5.omqHv8FAaToMH7
+origin
+https://x.com
+priority
+u=1, i
+referer
+https://x.com/
+sec-ch-ua
+"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"
+sec-ch-ua-mobile
+?1
+sec-ch-ua-platform
+"Android"
+sec-fetch-dest
+empty
+sec-fetch-mode
+cors
+sec-fetch-site
+same-site
+user-agent
+Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36
+x-client-transaction-id
+2M4DKX4SFd7SSY5V8JAAiX+fyLEQeyTS1yrY5nuojpigC5WogAso+K4rU3bwfHOhb4RK8917C287KhqM51RsHMvytVK62w
+x-guest-token
+2016751428644327622
+x-twitter-active-user
+yes
+x-twitter-client-language
+en-GB
