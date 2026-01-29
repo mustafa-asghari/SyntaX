@@ -27,34 +27,39 @@ from debug import C
 
 
 def _init_client() -> XClient:
-    """Initialize client with parallel init (txn + token).
-    Optimized: both txn generator and token creation run truly in parallel.
+    """Initialize client with maximum parallelization.
+    Runs operations concurrently:
+    1. Transaction ID generator initialization (fetches x.com + JS)
+    2. Token creation (auth or guest token)
+    
+    For guest tokens: token creation already warms TLS to api.x.com
+    For auth tokens: we pre-warm TLS after token is set
     """
     browser = random.choice(BROWSER_PROFILES)
     client = XClient(browser=browser)
     token_result = [None]
-    txn_done = threading.Event()
+    is_auth = [False]
 
     def _create_token():
         auth_token = os.environ.get("X_AUTH_TOKEN")
         ct0 = os.environ.get("X_CT0")
         if auth_token and ct0:
             token_result[0] = create_auth_token_set(auth_token, ct0)
+            is_auth[0] = True
         else:
+            # Guest token creation uses session = warms TLS already
             token_result[0] = create_token_set(browser, session=client.session)
             client.session.cookies.clear()
 
     def _init_txn():
         _txn_generator._ensure_initialized()
-        txn_done.set()
 
-    # Start both in parallel
+    # Start token + txn in parallel
     t1 = threading.Thread(target=_create_token, daemon=True)
     t2 = threading.Thread(target=_init_txn, daemon=True)
     t1.start()
     t2.start()
     
-    # Wait for both
     t1.join(timeout=15)
     t2.join(timeout=15)
 
@@ -64,6 +69,11 @@ def _init_client() -> XClient:
         sys.exit(1)
 
     client.token_set = ts
+    
+    # For auth tokens, pre-warm TLS now (doesn't block - runs in background)
+    if is_auth[0]:
+        threading.Thread(target=client.prewarm_connection, daemon=True).start()
+    
     return client
 
 

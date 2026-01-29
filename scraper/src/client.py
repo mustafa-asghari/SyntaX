@@ -247,6 +247,22 @@ class XClient:
             self._session = requests.Session(impersonate=self._browser)
         return self._session
 
+    def prewarm_connection(self) -> None:
+        """Pre-warm TLS connection to api.x.com.
+        Call this during initialization to avoid cold-start latency on first request.
+        Uses a lightweight HEAD request that X's API accepts.
+        """
+        try:
+            # HEAD request to establish TLS without fetching data
+            self.session.head(
+                "https://api.x.com/",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=(_CONNECT_TIMEOUT, 2),  # Short read timeout for HEAD
+            )
+            self.session.cookies.clear()
+        except Exception:
+            pass  # Swallow errors - pre-warming is best-effort
+
     def _get_headers(self, url: str, method: str = "GET") -> Dict[str, str]:
         """Build headers with transaction ID. Uses pre-built template."""
         if not self.token_set:
