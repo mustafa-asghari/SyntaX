@@ -292,6 +292,10 @@ class XClient:
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
 
+        # Clear response cookies so X can't track/throttle across requests
+        # TLS connection stays warm (cookies are HTTP-level, not TCP-level)
+        self.session.cookies.clear()
+
         if rd:
             rd.phase("parse response")
             rd.status_code = response.status_code
