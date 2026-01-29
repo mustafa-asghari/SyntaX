@@ -8,7 +8,8 @@ import signal
 import sys
 
 from .client import create_token_set
-from .token_pool import TokenPool
+from .token_pool import TokenPool, get_pool
+from .proxy_manager import get_proxy_manager
 from .config import TOKEN_CONFIG
 
 
@@ -22,7 +23,8 @@ class TokenManager:
     """
 
     def __init__(self):
-        self.pool = TokenPool()
+        self.pool = get_pool()
+        self._proxy_manager = get_proxy_manager()
         self.running = False
         self.stats = {
             "tokens_created": 0,
@@ -68,7 +70,11 @@ class TokenManager:
         print(f"Filling pool: {current}/{target}")
 
         while self.pool.pool_size() < target and self.running:
-            token_set = create_token_set()
+            proxy_cfg = self._proxy_manager.get_proxy()
+            proxy = proxy_cfg.to_curl_cffi_format() if proxy_cfg else None
+            token_set = create_token_set(proxy=proxy)
+            if proxy_cfg:
+                self._proxy_manager.report_result(proxy_cfg, success=token_set is not None)
             if token_set:
                 self.pool.add_token(token_set)
                 self.stats["tokens_created"] += 1
@@ -91,7 +97,11 @@ class TokenManager:
             self._fill_pool()
         elif current_size < target_size:
             # Generate one token per cycle to maintain pool
-            token_set = create_token_set()
+            proxy_cfg = self._proxy_manager.get_proxy()
+            proxy = proxy_cfg.to_curl_cffi_format() if proxy_cfg else None
+            token_set = create_token_set(proxy=proxy)
+            if proxy_cfg:
+                self._proxy_manager.report_result(proxy_cfg, success=token_set is not None)
             if token_set:
                 self.pool.add_token(token_set)
                 self.stats["tokens_created"] += 1

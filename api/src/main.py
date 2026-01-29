@@ -18,7 +18,8 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper'))
 
 from src.client import XClient, create_token_set
-from src.token_pool import TokenPool
+from src.token_pool import get_pool, AnyTokenPool
+from src.proxy_manager import get_proxy_manager
 from src.endpoints.user import get_user_by_username, get_user_by_id
 from src.endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
 from src.endpoints.search import search_tweets
@@ -32,36 +33,102 @@ class APIResponse(BaseModel):
     meta: dict = {}
 
 
+# ── Session Pool ───────────────────────────────────────────
+import random
+import threading
+from collections import deque
+from curl_cffi import requests as curl_requests
+
+
+class SessionPool:
+    """
+    Reuses curl-cffi sessions across API requests to skip the 200-400ms
+    TLS handshake on every call.
+    """
+
+    def __init__(self, max_size: int = 8):
+        self._pool: deque = deque()
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def acquire(self, browser: str = "chrome131", proxy: Optional[dict] = None) -> curl_requests.Session:
+        with self._lock:
+            if self._pool:
+                session = self._pool.popleft()
+                session.cookies.clear()
+                return session
+        # Create a new session outside the lock
+        session = curl_requests.Session(impersonate=browser)
+        if proxy:
+            session.proxies = proxy
+        return session
+
+    def release(self, session: curl_requests.Session) -> None:
+        session.cookies.clear()
+        with self._lock:
+            if len(self._pool) < self._max_size:
+                self._pool.append(session)
+                return
+        # Pool full — close the session
+        session.close()
+
+    def close_all(self) -> None:
+        with self._lock:
+            while self._pool:
+                self._pool.pop().close()
+
+
 # Globals
-pool: Optional[TokenPool] = None
+pool: Optional[AnyTokenPool] = None
+session_pool: Optional[SessionPool] = None
+_proxy_manager = None
 
 
 def _get_client():
     """Get an XClient with a token from the pool or on-demand."""
     token_set = pool.get_token() if pool else None
 
+    # Determine proxy
+    proxy = None
+    if _proxy_manager and _proxy_manager.has_proxies:
+        proxy_cfg = _proxy_manager.get_proxy()
+        if proxy_cfg:
+            proxy = proxy_cfg.to_curl_cffi_format()
+
     if not token_set:
-        token_set = create_token_set()
+        token_set = create_token_set(proxy=proxy)
         if not token_set:
             raise HTTPException(status_code=503, detail="Unable to create authentication token")
 
-    return XClient(token_set=token_set), token_set
+    client = XClient(token_set=token_set, proxy=proxy, token_pool_ref=pool)
+    return client, token_set
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global pool
+    global pool, session_pool, _proxy_manager
 
     print("Starting SyntaX API...")
 
-    pool = TokenPool()
+    pool = get_pool()  # auto-detects Redis vs in-memory
+    session_pool = SessionPool()
+    _proxy_manager = get_proxy_manager()
+
+    if _proxy_manager.has_proxies:
+        print(f"Proxy manager loaded ({_proxy_manager.count} proxies)")
+
     print(f"Token pool initialized (size: {pool.pool_size()})")
 
     if pool.pool_size() == 0:
         print("Pool empty, creating initial tokens...")
         for i in range(5):
-            token_set = create_token_set()
+            proxy = None
+            if _proxy_manager.has_proxies:
+                pcfg = _proxy_manager.get_proxy()
+                if pcfg:
+                    proxy = pcfg.to_curl_cffi_format()
+            token_set = create_token_set(proxy=proxy)
             if token_set:
                 pool.add_token(token_set)
                 print(f"  Created token {i+1}/5")
@@ -70,6 +137,8 @@ async def lifespan(app: FastAPI):
     yield
 
     print("Shutting down SyntaX API...")
+    if session_pool:
+        session_pool.close_all()
     if pool:
         pool.close()
 

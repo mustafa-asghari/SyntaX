@@ -40,6 +40,7 @@ from config import (
     BROWSER_PROFILES,
     FEATURES,
     FIELD_TOGGLES,
+    TOKEN_CONFIG,
 )
 
 from debug import RequestDebug, SpeedDebugger
@@ -233,27 +234,32 @@ class XClient:
     - Batch parallel request support
     - Proxy support for distributed scraping
     """
-    __slots__ = ('token_set', '_browser', '_session', '_headers_cache', '_proxy')
+    __slots__ = ('token_set', '_browser', '_session', '_headers_cache', '_proxy',
+                 '_token_pool_ref')
 
     def __init__(
         self,
         token_set: Optional[TokenSet] = None,
         browser: str = "chrome131",
         proxy: Optional[Dict[str, str]] = None,
+        token_pool_ref=None,
     ):
         """
         Initialize XClient.
-        
+
         Args:
             token_set: Token credentials for authentication
             browser: Browser profile to impersonate
             proxy: Proxy dict {"http": "url", "https": "url"} for all requests
+            token_pool_ref: Optional token pool — when set, auto-rotates to a
+                fresh token when the current one expires or hits request limit
         """
         self.token_set = token_set
         self._browser = browser
         self._session = None
         self._headers_cache: Optional[Dict[str, str]] = None
         self._proxy = proxy
+        self._token_pool_ref = token_pool_ref
 
     @property
     def session(self) -> requests.Session:
@@ -323,6 +329,33 @@ class XClient:
             **(({"__cf_bm": self.token_set.cf_cookie}) if self.token_set.cf_cookie else {}),
         }
 
+    def _check_token_health(self) -> None:
+        """Check token age and request count; auto-rotate from pool if expired."""
+        if not self.token_set:
+            return
+        age = time.time() - self.token_set.created_at
+        expired = age > TOKEN_CONFIG["guest_token_ttl"]
+        exhausted = self.token_set.request_count >= TOKEN_CONFIG["max_requests_per_token"]
+
+        if (expired or exhausted) and self._token_pool_ref is not None:
+            # Return old token (if not expired) and grab a fresh one
+            if not expired:
+                self._token_pool_ref.return_token(self.token_set, success=True)
+            new_token = self._token_pool_ref.get_token()
+            if new_token:
+                self.token_set = new_token
+                # Reset session cookies for the new token
+                if self._session:
+                    self._session.cookies.clear()
+            else:
+                # Pool empty — create one on-demand
+                from config import BROWSER_PROFILES
+                fresh = create_token_set(browser=random.choice(BROWSER_PROFILES), proxy=self._proxy)
+                if fresh:
+                    self.token_set = fresh
+                    if self._session:
+                        self._session.cookies.clear()
+
     def graphql_request(
         self,
         query_id: str,
@@ -342,6 +375,9 @@ class XClient:
         Returns:
             Tuple of (response_data, response_time_ms)
         """
+        # Pre-request: rotate token if expired/exhausted (no delay)
+        self._check_token_health()
+
         rd = debug_obj
 
         url = f"{GRAPHQL_BASE_URL}/{query_id}/{operation_name}"

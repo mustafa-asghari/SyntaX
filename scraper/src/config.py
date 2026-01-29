@@ -131,10 +131,10 @@ REDIS_KEYS = {
 # Token settings
 TOKEN_CONFIG = {
     "cf_cookie_ttl": 1200,  # 20 minutes (refresh before 30min expiry)
-    "guest_token_ttl": 3600,  # 1 hour (refresh before 2hr expiry)
-    "max_requests_per_token": 400,  # Retire token after this many requests
-    "pool_min_size": 50,  # Minimum tokens in pool
-    "pool_target_size": 100,  # Target pool size
+    "guest_token_ttl": 1200,  # 20 minutes (X limits ~150 req/15min, rotate early)
+    "max_requests_per_token": 100,  # Retire token after this many requests (stay under X's ~150/15min)
+    "pool_min_size": 10,  # Minimum tokens in pool
+    "pool_target_size": 30,  # Target pool size (without proxies, same-IP tokens share rate limits)
     "generation_interval": 5,  # Seconds between generating new token sets
 }
 

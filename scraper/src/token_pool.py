@@ -1,14 +1,14 @@
 """
 SyntaX Token Pool Manager
-Manages a pool of pre-warmed tokens in Redis for zero-latency token acquisition.
+Manages a pool of pre-warmed tokens for zero-latency token acquisition.
+Supports Redis-backed pool or in-memory fallback (no Redis required).
 """
 
 import time
-import asyncio
-from typing import Optional, List
+import threading
+from typing import Optional, List, Union
 from dataclasses import dataclass
 
-import redis
 import orjson
 
 from .config import (
@@ -17,6 +17,99 @@ from .config import (
     get_redis_url,
 )
 from .client import TokenSet, create_token_set
+
+
+class InMemoryTokenPool:
+    """
+    Thread-safe in-memory token pool.
+
+    Same interface as TokenPool but uses a sorted list + threading lock
+    instead of Redis. Suitable for single-process setups without Redis.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # List of (health_score, token_id, TokenSet)
+        self._tokens: List[tuple] = []
+        self._token_counter = 0
+
+    def add_token(self, token_set: TokenSet) -> str:
+        token_id = f"{int(token_set.created_at * 1000)}_{self._token_counter}"
+        with self._lock:
+            self._token_counter += 1
+            self._tokens.append((1.0, token_id, token_set))
+            self._tokens.sort(key=lambda x: x[0], reverse=True)
+        return token_id
+
+    def get_token(self) -> Optional[TokenSet]:
+        with self._lock:
+            while self._tokens:
+                score, token_id, token_set = self._tokens.pop(0)
+                age = time.time() - token_set.created_at
+                if age > TOKEN_CONFIG["guest_token_ttl"]:
+                    continue  # expired, skip
+                return token_set
+            return None
+
+    def return_token(self, token_set: TokenSet, success: bool = True) -> None:
+        age = time.time() - token_set.created_at
+        if age > TOKEN_CONFIG["guest_token_ttl"]:
+            return
+        if token_set.request_count >= TOKEN_CONFIG["max_requests_per_token"]:
+            return
+
+        base_score = 1.0
+        if not success:
+            base_score -= 0.2
+        age_penalty = age / TOKEN_CONFIG["guest_token_ttl"] * 0.3
+        health_score = max(0.1, base_score - age_penalty)
+
+        token_id = f"{int(token_set.created_at * 1000)}"
+        with self._lock:
+            self._tokens.append((health_score, token_id, token_set))
+            self._tokens.sort(key=lambda x: x[0], reverse=True)
+
+    def pool_size(self) -> int:
+        with self._lock:
+            return len(self._tokens)
+
+    def pool_stats(self) -> dict:
+        with self._lock:
+            if not self._tokens:
+                return {"size": 0, "avg_health": 0, "min_health": 0, "max_health": 0}
+            scores = [t[0] for t in self._tokens]
+            return {
+                "size": len(self._tokens),
+                "avg_health": sum(scores) / len(scores),
+                "min_health": min(scores),
+                "max_health": max(scores),
+            }
+
+    def clear_pool(self) -> int:
+        with self._lock:
+            count = len(self._tokens)
+            self._tokens.clear()
+            return count
+
+    def fill_pool(self, target_size: Optional[int] = None) -> int:
+        target = target_size or TOKEN_CONFIG["pool_target_size"]
+        current = self.pool_size()
+        to_add = max(0, target - current)
+
+        added = 0
+        for _ in range(to_add):
+            token_set = create_token_set()
+            if token_set:
+                self.add_token(token_set)
+                added += 1
+                print(f"Added token {added}/{to_add}")
+            else:
+                print("Failed to create token")
+        return added
+
+    def close(self):
+        """No-op for in-memory pool."""
+        pass
 
 
 class TokenPool:
@@ -31,14 +124,16 @@ class TokenPool:
     """
 
     def __init__(self, redis_url: Optional[str] = None):
+        import redis as _redis
         self.redis_url = redis_url or get_redis_url()
-        self._redis: Optional[redis.Redis] = None
+        self._redis: Optional[_redis.Redis] = None
 
     @property
-    def redis_client(self) -> redis.Redis:
+    def redis_client(self):
         """Lazy-load Redis connection."""
         if self._redis is None:
-            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            import redis as _redis
+            self._redis = _redis.from_url(self.redis_url, decode_responses=True)
         return self._redis
 
     def _token_key(self, token_id: str) -> str:
@@ -222,22 +317,42 @@ class TokenPool:
             self._redis = None
 
 
+# Union type for pool instances
+AnyTokenPool = Union[TokenPool, InMemoryTokenPool]
+
 # Singleton instance
-_pool: Optional[TokenPool] = None
+_pool: Optional[AnyTokenPool] = None
 
 
-def get_pool() -> TokenPool:
-    """Get the global token pool instance."""
+def get_pool() -> AnyTokenPool:
+    """
+    Get the global token pool instance.
+
+    Auto-detects backend: tries Redis ping, falls back to in-memory.
+    """
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+
+    # Try Redis first
+    try:
+        import redis as _redis
+        r = _redis.from_url(get_redis_url(), decode_responses=True)
+        r.ping()
+        r.close()
         _pool = TokenPool()
+        print("[TokenPool] Using Redis backend")
+    except Exception:
+        _pool = InMemoryTokenPool()
+        print("[TokenPool] Redis unavailable, using in-memory backend")
+
     return _pool
 
 
 # Test function
 def test_pool():
     """Test the token pool."""
-    pool = TokenPool()
+    pool = get_pool()
 
     print("Creating token set...")
     token_set = create_token_set()
