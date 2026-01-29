@@ -1,6 +1,9 @@
 """
 SyntaX User Endpoints
 Endpoints for fetching X user data.
+
+Speed optimizations:
+- __slots__ on User dataclass for faster attribute access
 """
 
 from typing import Optional, Dict, Any
@@ -10,9 +13,9 @@ from client import XClient, TokenSet
 from config import QUERY_IDS, FEATURES, FIELD_TOGGLES
 
 
-@dataclass
+@dataclass(slots=True)
 class User:
-    """Parsed X user data."""
+    """Parsed X user data. Uses slots=True for faster access."""
     id: str
     username: str
     name: str

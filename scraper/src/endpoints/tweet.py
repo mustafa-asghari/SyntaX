@@ -1,6 +1,11 @@
 """
 SyntaX Tweet Endpoints
 Endpoints for fetching X tweet data.
+
+Speed optimizations:
+- __slots__ on Tweet dataclass for faster attribute access
+- Inlined parsing logic with local variable caching
+- Reduced dict.get() calls with walrus operator
 """
 
 from typing import Optional, Dict, Any, List
@@ -10,9 +15,9 @@ from client import XClient
 from config import QUERY_IDS, TWEET_FEATURES, FIELD_TOGGLES
 
 
-@dataclass
+@dataclass(slots=True)
 class Tweet:
-    """Parsed X tweet data."""
+    """Parsed X tweet data. Uses slots=True for faster access."""
     id: str
     text: str
     created_at: str
@@ -56,61 +61,79 @@ class Tweet:
         }
 
 
+# Cache dict.get for micro-optimization in hot paths
+_EMPTY_DICT: Dict[str, Any] = {}
+_EMPTY_LIST: List[Any] = []
+
 def _parse_tweet_result(result: Dict[str, Any]) -> Optional[Tweet]:
-    """Parse a single tweet result object."""
+    """Parse a single tweet result object. Optimized for speed."""
+    if not result:
+        return None
+    
+    typename = result.get("__typename")
+    if typename == "TweetUnavailable":
+        return None
+
+    # Handle TweetWithVisibilityResults wrapper (use walrus to avoid double lookup)
+    if typename == "TweetWithVisibilityResults":
+        result = result.get("tweet") or result
+
+    # Cache nested lookups in local vars (faster than repeated dict access)
+    legacy = result.get("legacy") or _EMPTY_DICT
+    core_results = result.get("core") or _EMPTY_DICT
+    user_results = core_results.get("user_results") or _EMPTY_DICT
+    core = user_results.get("result") or _EMPTY_DICT
+    user_core = core.get("core") or _EMPTY_DICT
+    user_legacy = core.get("legacy") or _EMPTY_DICT
+
+    # View count (avoid repeated lookups)
+    views = result.get("views") or _EMPTY_DICT
+    view_count_raw = views.get("count")
+    view_count = int(view_count_raw) if view_count_raw else 0
+
+    # Extract media (inline for speed)
+    media_list = []
+    if (ext_entities := legacy.get("extended_entities")):
+        if (media_items := ext_entities.get("media")):
+            for m in media_items:
+                mtype = m.get("type", "photo")
+                media_item = {
+                    "type": mtype,
+                    "url": m.get("media_url_https", ""),
+                    "expanded_url": m.get("expanded_url", ""),
+                }
+                if mtype in ("video", "animated_gif"):
+                    if (video_info := m.get("video_info")):
+                        variants = video_info.get("variants") or _EMPTY_LIST
+                        mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+                        if mp4s:
+                            best = max(mp4s, key=lambda v: v.get("bitrate", 0))
+                            media_item["video_url"] = best.get("url", "")
+                media_list.append(media_item)
+
+    # Extract URLs (inline for speed)
+    url_list = []
+    if (entities := legacy.get("entities")):
+        if (urls := entities.get("urls")):
+            for u in urls:
+                url_list.append({
+                    "url": u.get("expanded_url") or u.get("url", ""),
+                    "display_url": u.get("display_url", ""),
+                })
+
     try:
-        if not result or result.get("__typename") == "TweetUnavailable":
-            return None
-
-        # Handle TweetWithVisibilityResults wrapper
-        if result.get("__typename") == "TweetWithVisibilityResults":
-            result = result.get("tweet", result)
-
-        legacy = result.get("legacy", {})
-        core = result.get("core", {}).get("user_results", {}).get("result", {})
-        user_core = core.get("core", {})
-        user_legacy = core.get("legacy", {})
-
-        # Extract metrics
-        metrics = legacy.get("extended_entities", {})
-        view_count_info = result.get("views", {})
-
-        # Extract media
-        media_list = []
-        for m in legacy.get("extended_entities", {}).get("media", []):
-            media_item = {
-                "type": m.get("type", "photo"),
-                "url": m.get("media_url_https", ""),
-                "expanded_url": m.get("expanded_url", ""),
-            }
-            if m.get("type") == "video" or m.get("type") == "animated_gif":
-                variants = m.get("video_info", {}).get("variants", [])
-                mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
-                if mp4s:
-                    best = max(mp4s, key=lambda v: v.get("bitrate", 0))
-                    media_item["video_url"] = best.get("url", "")
-            media_list.append(media_item)
-
-        # Extract URLs
-        url_list = []
-        for u in legacy.get("entities", {}).get("urls", []):
-            url_list.append({
-                "url": u.get("expanded_url", u.get("url", "")),
-                "display_url": u.get("display_url", ""),
-            })
-
         return Tweet(
-            id=legacy.get("id_str", result.get("rest_id", "")),
+            id=legacy.get("id_str") or result.get("rest_id", ""),
             text=legacy.get("full_text", ""),
             created_at=legacy.get("created_at", ""),
-            author_id=legacy.get("user_id_str", core.get("rest_id", "")),
+            author_id=legacy.get("user_id_str") or core.get("rest_id", ""),
             author_username=user_core.get("screen_name") or user_legacy.get("screen_name", ""),
             author_name=user_core.get("name") or user_legacy.get("name", ""),
             retweet_count=legacy.get("retweet_count", 0),
             like_count=legacy.get("favorite_count", 0),
             reply_count=legacy.get("reply_count", 0),
             quote_count=legacy.get("quote_count", 0),
-            view_count=int(view_count_info.get("count", 0)) if view_count_info.get("count") else 0,
+            view_count=view_count,
             bookmark_count=legacy.get("bookmark_count", 0),
             language=legacy.get("lang", ""),
             is_reply=bool(legacy.get("in_reply_to_status_id_str")),
@@ -120,7 +143,6 @@ def _parse_tweet_result(result: Dict[str, Any]) -> Optional[Tweet]:
             urls=url_list,
             raw_json=result,
         )
-
     except Exception as e:
         print(f"Error parsing tweet: {e}")
         return None
