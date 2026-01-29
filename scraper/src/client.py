@@ -231,20 +231,38 @@ class XClient:
     - Aggressive timeouts
     - Pre-built headers and cached JSON
     - Batch parallel request support
+    - Proxy support for distributed scraping
     """
-    __slots__ = ('token_set', '_browser', '_session', '_headers_cache')
+    __slots__ = ('token_set', '_browser', '_session', '_headers_cache', '_proxy')
 
-    def __init__(self, token_set: Optional[TokenSet] = None, browser: str = "chrome131"):
+    def __init__(
+        self,
+        token_set: Optional[TokenSet] = None,
+        browser: str = "chrome131",
+        proxy: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Initialize XClient.
+        
+        Args:
+            token_set: Token credentials for authentication
+            browser: Browser profile to impersonate
+            proxy: Proxy dict {"http": "url", "https": "url"} for all requests
+        """
         self.token_set = token_set
         self._browser = browser
         self._session = None
-        self._headers_cache: Optional[Dict[str, str]] = None  # Cache for repeated requests
+        self._headers_cache: Optional[Dict[str, str]] = None
+        self._proxy = proxy
 
     @property
     def session(self) -> requests.Session:
         """Lazy-init session. One session per client = clean cookies + connection reuse."""
         if self._session is None:
             self._session = requests.Session(impersonate=self._browser)
+            # Set proxy on session if configured
+            if self._proxy:
+                self._session.proxies = self._proxy
         return self._session
 
     def prewarm_connection(self) -> None:
@@ -448,15 +466,32 @@ class XClient:
 # Pre-built header for guest token (never changes)
 _GUEST_TOKEN_HEADER = {"authorization": f"Bearer {BEARER_TOKEN}"}
 
-def get_guest_token(browser: str = "chrome131", session: Optional[requests.Session] = None) -> Optional[str]:
+def get_guest_token(
+    browser: str = "chrome131",
+    session: Optional[requests.Session] = None,
+    proxy: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Get a guest token from X API.
-    If a session is provided, uses it (warms TLS as side effect). Otherwise creates a one-off request."""
+    
+    Args:
+        browser: Browser profile to impersonate
+        session: Optional session for connection reuse
+        proxy: Optional proxy dict {"http": "url", "https": "url"}
+        
+    If a session is provided, uses it (warms TLS as side effect).
+    Otherwise creates a one-off request.
+    
+    IMPORTANT: When scaling, generate each token from a DIFFERENT proxy IP.
+    Tokens generated from the same IP share the same "trust pool" and will
+    be rate-limited together.
+    """
     try:
         if session:
             response = session.post(
                 GUEST_TOKEN_URL,
                 headers=_GUEST_TOKEN_HEADER,
                 timeout=_DEFAULT_TIMEOUT,
+                proxies=proxy,
             )
         else:
             response = requests.post(
@@ -464,6 +499,7 @@ def get_guest_token(browser: str = "chrome131", session: Optional[requests.Sessi
                 headers=_GUEST_TOKEN_HEADER,
                 impersonate=browser,
                 timeout=_DEFAULT_TIMEOUT,
+                proxies=proxy,
             )
         response.raise_for_status()
         data = orjson.loads(response.content)
@@ -473,12 +509,28 @@ def get_guest_token(browser: str = "chrome131", session: Optional[requests.Sessi
         return None
 
 
-def create_token_set(browser: Optional[str] = None, session: Optional[requests.Session] = None) -> Optional[TokenSet]:
+def create_token_set(
+    browser: Optional[str] = None,
+    session: Optional[requests.Session] = None,
+    proxy: Optional[Dict[str, str]] = None,
+) -> Optional[TokenSet]:
     """Create a guest token set for X API requests.
-    If a session is provided, uses it (warms TLS to api.x.com as side effect)."""
+    
+    Args:
+        browser: Browser profile to impersonate
+        session: Optional session for connection reuse  
+        proxy: Optional proxy for this token generation
+        
+    If a session is provided, uses it (warms TLS to api.x.com as side effect).
+    
+    For industrial-scale scraping:
+    - Generate tokens from rotating proxies (each token = different IP)
+    - Use each token for ~50-100 requests max
+    - Discard and generate new tokens frequently
+    """
     browser = browser or random.choice(BROWSER_PROFILES)
 
-    guest_token = get_guest_token(browser, session=session)
+    guest_token = get_guest_token(browser, session=session, proxy=proxy)
     if not guest_token:
         return None
 
