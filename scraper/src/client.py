@@ -67,11 +67,9 @@ def _get_executor(max_workers: int = 10) -> ThreadPoolExecutor:
 
 # ── Token Set ───────────────────────────────────────────────
 
-@dataclass(slots=True)
+@dataclass
 class TokenSet:
-    """A complete set of tokens needed for X API requests.
-    Uses slots=True for faster attribute access and lower memory.
-    """
+    """A complete set of tokens needed for X API requests."""
     guest_token: str
     csrf_token: str
     created_at: float
@@ -79,6 +77,10 @@ class TokenSet:
     auth_token: Optional[str] = None
     ct0: Optional[str] = None
     request_count: int = 0
+    # Full cookie jar collected from visiting x.com — includes guest_id,
+    # guest_id_marketing, guest_id_ads, personalization_id, __cf_bm, etc.
+    # These are required for SearchTimeline and TweetDetail with guest tokens.
+    session_cookies: Optional[Dict[str, str]] = None
 
     @property
     def is_authenticated(self) -> bool:
@@ -91,6 +93,7 @@ class TokenSet:
             "created_at": self.created_at,
             "cf_cookie": self.cf_cookie or "",
             "request_count": self.request_count,
+            "session_cookies": self.session_cookies or {},
         }
 
     @classmethod
@@ -101,6 +104,7 @@ class TokenSet:
             created_at=float(data["created_at"]),
             cf_cookie=data.get("cf_cookie") or None,
             request_count=int(data.get("request_count", 0)),
+            session_cookies=data.get("session_cookies") or None,
         )
 
 
@@ -186,6 +190,7 @@ _HEADER_TEMPLATE_GUEST = {
     "authorization": f"Bearer {BEARER_TOKEN}",
     "x-twitter-active-user": "yes",
     "x-twitter-client-language": "en",
+    "x-twitter-client": "Guest",
     "content-type": "application/json",
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.9",
@@ -310,24 +315,38 @@ class XClient:
         return headers
 
     def _get_cookies(self) -> Dict[str, str]:
-        """Build cookies for X API request. Cached for repeated requests."""
+        """Build cookies for X API request.
+
+        For guest tokens, merges the full session cookie jar (collected
+        from visiting x.com during token creation) with the guest/csrf
+        tokens.  This is required for SearchTimeline and TweetDetail.
+        """
         if not self.token_set:
             raise ValueError("No token set configured")
 
-        # For auth tokens that don't change, we could cache, but cookies
-        # include dynamic tokens so rebuild each time
         if self.token_set.is_authenticated:
             return {
                 "auth_token": self.token_set.auth_token,
                 "ct0": self.token_set.ct0,
             }
 
-        return {
+        # Start with session cookies from x.com (guest_id_marketing,
+        # guest_id_ads, personalization_id, __cf_bm, etc.)
+        cookies: Dict[str, str] = {}
+        if self.token_set.session_cookies:
+            cookies.update(self.token_set.session_cookies)
+
+        # Overlay the guest-specific tokens
+        cookies.update({
             "guest_id": f"v1%3A{self.token_set.guest_token}",
             "gt": self.token_set.guest_token,
             "ct0": self.token_set.csrf_token,
-            **(({"__cf_bm": self.token_set.cf_cookie}) if self.token_set.cf_cookie else {}),
-        }
+        })
+
+        if self.token_set.cf_cookie:
+            cookies["__cf_bm"] = self.token_set.cf_cookie
+
+        return cookies
 
     def _check_token_health(self) -> None:
         """Check token age and request count; auto-rotate from pool if expired."""
@@ -432,7 +451,7 @@ class XClient:
             rd.status_code = response.status_code
             rd.response_size = len(response.content) if response.content else 0
 
-        if debug or response.status_code != 200:
+        if debug and response.status_code != 200:
             print(f"  Status: {response.status_code}")
             print(f"  Response: {response.text[:500] if response.text else 'empty'}")
 

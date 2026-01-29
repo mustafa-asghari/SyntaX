@@ -186,6 +186,10 @@ def get_tweet_detail(
     """
     Get tweet detail with conversation thread.
 
+    Requires the X-Twitter-Client: Guest header for guest tokens
+    (set in the client's header template). Falls back to
+    TweetResultByRestId on failure.
+
     Returns:
         Tuple of (main_tweet, reply_tweets, response_time_ms)
     """
@@ -204,14 +208,19 @@ def get_tweet_detail(
         "withVoice": True,
     }
 
-    data, elapsed_ms = client.graphql_request(
-        query_id=query_id,
-        operation_name="TweetDetail",
-        variables=variables,
-        features=TWEET_FEATURES,
-        field_toggles={"withArticlePlainText": False},
-        debug=debug,
-    )
+    try:
+        data, elapsed_ms = client.graphql_request(
+            query_id=query_id,
+            operation_name="TweetDetail",
+            variables=variables,
+            features=TWEET_FEATURES,
+            field_toggles={"withArticlePlainText": False},
+            debug=debug,
+        )
+    except Exception:
+        # Fall back to single tweet lookup
+        main_tweet, elapsed_ms = get_tweet_by_id(tweet_id, client, debug=debug)
+        return main_tweet, [], elapsed_ms
 
     # Parse conversation thread
     main_tweet = None
