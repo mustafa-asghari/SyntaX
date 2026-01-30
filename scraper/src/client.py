@@ -564,37 +564,94 @@ def get_guest_token(
         return None
 
 
+def _collect_session_cookies(
+    browser: str = "chrome131",
+    session: Optional[requests.Session] = None,
+    proxy: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Visit x.com to collect the full guest session cookie jar.
+
+    X sets cookies on the homepage that are required for certain
+    endpoints (SearchTimeline, TweetDetail) to work with guest tokens:
+    guest_id, guest_id_marketing, guest_id_ads, personalization_id,
+    __cf_bm, etc.
+
+    Returns a dict of cookie name → value.
+    """
+    try:
+        if session:
+            resp = session.get(
+                X_HOME_URL,
+                timeout=_DEFAULT_TIMEOUT,
+                proxies=proxy,
+            )
+        else:
+            resp = requests.get(
+                X_HOME_URL,
+                impersonate=browser,
+                timeout=_DEFAULT_TIMEOUT,
+                proxies=proxy,
+            )
+
+        # Extract cookies from the response
+        cookies = {}
+        if session:
+            for name, value in session.cookies.items():
+                cookies[name] = value
+        else:
+            for name, value in resp.cookies.items():
+                cookies[name] = value
+        return cookies
+    except Exception as e:
+        print(f"Warning: could not collect session cookies: {e}")
+        return {}
+
+
 def create_token_set(
     browser: Optional[str] = None,
     session: Optional[requests.Session] = None,
     proxy: Optional[Dict[str, str]] = None,
 ) -> Optional[TokenSet]:
-    """Create a guest token set for X API requests.
-    
+    """Create a full guest session for X API requests.
+
+    Steps:
+    1. Visit x.com to collect session cookies (guest_id, cf, etc.)
+    2. Activate a guest token via the API
+    3. Bundle everything into a TokenSet
+
+    The session cookies + guest token + X-Twitter-Client: Guest header
+    are required for SearchTimeline and TweetDetail to work.
+
     Args:
         browser: Browser profile to impersonate
-        session: Optional session for connection reuse  
+        session: Optional session for connection reuse
         proxy: Optional proxy for this token generation
-        
-    If a session is provided, uses it (warms TLS to api.x.com as side effect).
-    
-    For industrial-scale scraping:
-    - Generate tokens from rotating proxies (each token = different IP)
-    - Use each token for ~50-100 requests max
-    - Discard and generate new tokens frequently
     """
     browser = browser or random.choice(BROWSER_PROFILES)
 
+    # Step 1: Collect session cookies from x.com
+    session_cookies = _collect_session_cookies(browser, session=session, proxy=proxy)
+
+    # Clear session cookies so they don't interfere with the API call
+    if session:
+        session.cookies.clear()
+
+    # Step 2: Get guest token
     guest_token = get_guest_token(browser, session=session, proxy=proxy)
     if not guest_token:
         return None
 
     csrf_token = secrets.token_hex(16)
 
+    # Extract cf_cookie if present
+    cf_cookie = session_cookies.get("__cf_bm")
+
     return TokenSet(
         guest_token=guest_token,
         csrf_token=csrf_token,
         created_at=time.time(),
+        cf_cookie=cf_cookie,
+        session_cookies=session_cookies,
     )
 
 
