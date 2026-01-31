@@ -14,15 +14,16 @@ from fastapi.responses import ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Add scraper to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper'))
+# Add scraper/src to path so absolute imports (from config, from client, etc.) work
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper', 'src'))
 
-from src.client import XClient, create_token_set
-from src.token_pool import get_pool, AnyTokenPool
-from src.proxy_manager import get_proxy_manager
-from src.endpoints.user import get_user_by_username, get_user_by_id
-from src.endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
-from src.endpoints.search import search_tweets
+from client import XClient, create_token_set
+from token_pool import get_pool, AnyTokenPool
+from proxy_manager import get_proxy_manager
+from endpoints.user import get_user_by_username, get_user_by_id
+from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
+from endpoints.search import search_tweets
+from endpoints.social import get_followers, get_following
 
 
 # Response models
@@ -378,6 +379,83 @@ async def search(
                 "response_time_ms": round(total_time, 1),
                 "x_api_time_ms": round(api_time, 1),
                 "count": len(tweets),
+                "next_cursor": next_cursor,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Social Endpoints ────────────────────────────────────────
+
+
+@app.get("/v1/users/{user_id}/followers", response_model=APIResponse)
+async def get_user_followers(
+    user_id: str,
+    count: int = Query(default=20, le=40),
+    cursor: Optional[str] = Query(default=None),
+):
+    """Get a user's followers. Requires numeric user_id. Auth-gated."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        users, next_cursor, api_time = get_followers(user_id, client, count=count, cursor=cursor)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        return APIResponse(
+            success=True,
+            data=[u.to_dict() for u in users],
+            meta={
+                "response_time_ms": round(total_time, 1),
+                "x_api_time_ms": round(api_time, 1),
+                "count": len(users),
+                "next_cursor": next_cursor,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if pool:
+            pool.return_token(token_set, success=False)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/users/{user_id}/following", response_model=APIResponse)
+async def get_user_following(
+    user_id: str,
+    count: int = Query(default=20, le=40),
+    cursor: Optional[str] = Query(default=None),
+):
+    """Get users that a user follows. Requires numeric user_id. Auth-gated."""
+    start_time = time.perf_counter()
+    client, token_set = _get_client()
+
+    try:
+        users, next_cursor, api_time = get_following(user_id, client, count=count, cursor=cursor)
+        client.close()
+        total_time = (time.perf_counter() - start_time) * 1000
+
+        if pool:
+            pool.return_token(token_set, success=True)
+
+        return APIResponse(
+            success=True,
+            data=[u.to_dict() for u in users],
+            meta={
+                "response_time_ms": round(total_time, 1),
+                "x_api_time_ms": round(api_time, 1),
+                "count": len(users),
                 "next_cursor": next_cursor,
             },
         )

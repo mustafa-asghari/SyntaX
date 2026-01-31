@@ -11,12 +11,12 @@ from dataclasses import dataclass
 
 import orjson
 
-from .config import (
+from config import (
     REDIS_KEYS,
     TOKEN_CONFIG,
     get_redis_url,
 )
-from .client import TokenSet, create_token_set
+from client import TokenSet, create_token_set
 
 
 class InMemoryTokenPool:

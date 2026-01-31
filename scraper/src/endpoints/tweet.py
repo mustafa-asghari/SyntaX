@@ -11,8 +11,9 @@ Speed optimizations:
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
-from client import XClient
+from client import XClient, token_set_from_account
 from config import QUERY_IDS, TWEET_FEATURES, FIELD_TOGGLES
+from account_pool import get_account_pool
 
 
 @dataclass(slots=True)
@@ -186,9 +187,10 @@ def get_tweet_detail(
     """
     Get tweet detail with conversation thread.
 
-    Requires the X-Twitter-Client: Guest header for guest tokens
-    (set in the client's header template). Falls back to
-    TweetResultByRestId on failure.
+    Guest tokens get 404 for TweetDetail — uses an authenticated
+    account from the pool to get the full thread with replies.
+    Falls back to TweetResultByRestId (no replies) if no accounts
+    are available.
 
     Returns:
         Tuple of (main_tweet, reply_tweets, response_time_ms)
@@ -208,8 +210,26 @@ def get_tweet_detail(
         "withVoice": True,
     }
 
+    # Pick the right client: auth account for guest tokens, direct for auth
+    use_client = client
+    account = None
+    pool = None
+
+    if client.token_set and not client.token_set.is_authenticated:
+        # Guest token — grab an auth account from the pool
+        pool = get_account_pool()
+        account = pool.acquire() if pool.has_accounts else None
+
+        if account:
+            auth_ts = token_set_from_account(account)
+            use_client = XClient(token_set=auth_ts, proxy=account.proxy_dict)
+        else:
+            # No accounts — fall back to single tweet (no replies)
+            main_tweet, elapsed_ms = get_tweet_by_id(tweet_id, client, debug=debug)
+            return main_tweet, [], elapsed_ms
+
     try:
-        data, elapsed_ms = client.graphql_request(
+        data, elapsed_ms = use_client.graphql_request(
             query_id=query_id,
             operation_name="TweetDetail",
             variables=variables,
@@ -217,10 +237,18 @@ def get_tweet_detail(
             field_toggles={"withArticlePlainText": False},
             debug=debug,
         )
+        if account and pool:
+            pool.release(account, success=True)
     except Exception:
+        if account and pool:
+            status = 404
+            pool.release(account, success=False, status_code=status)
         # Fall back to single tweet lookup
         main_tweet, elapsed_ms = get_tweet_by_id(tweet_id, client, debug=debug)
         return main_tweet, [], elapsed_ms
+    finally:
+        if account and use_client is not client:
+            use_client.close()
 
     # Parse conversation thread
     main_tweet = None
@@ -237,7 +265,9 @@ def get_tweet_detail(
             continue
         for entry in instruction.get("entries", []):
             content = entry.get("content", {})
-            if content.get("entryType") == "TimelineTimelineItem":
+            entry_type = content.get("entryType", "")
+
+            if entry_type == "TimelineTimelineItem":
                 result = (
                     content.get("itemContent", {})
                     .get("tweet_results", {})
@@ -248,6 +278,18 @@ def get_tweet_detail(
                     if tweet.id == tweet_id:
                         main_tweet = tweet
                     else:
+                        replies.append(tweet)
+
+            elif entry_type == "TimelineTimelineModule":
+                for item in content.get("items", []):
+                    result = (
+                        item.get("item", {})
+                        .get("itemContent", {})
+                        .get("tweet_results", {})
+                        .get("result", {})
+                    )
+                    tweet = _parse_tweet_result(result)
+                    if tweet and tweet.id != tweet_id:
                         replies.append(tweet)
 
     return main_tweet, replies, elapsed_ms

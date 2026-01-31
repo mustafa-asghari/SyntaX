@@ -13,3 +13,12 @@ claude
 run.sh
 comp.txt
 MISSING_FEATURES.md
+settings.json
+COMPETITOR_ANALYSIS.md
+GUEST_TOKENS.md
+MISSING_FEATURES.md
+.plan
+.claude
+.claude/settings.json
+.claude/config.json
+.claude/skills.json

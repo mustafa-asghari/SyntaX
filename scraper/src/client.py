@@ -117,17 +117,20 @@ class TransactionIDGenerator:
     Generates valid x-client-transaction-id headers.
     Initialized eagerly in a background thread to avoid cold-start penalty.
     TTL: 2 hours (X rotates keys slowly).
-    
-    Uses RLock for reduced contention when many threads generate IDs.
+
+    Also captures session cookies from the x.com visit so create_token_set
+    doesn't need a second trip — saves ~400-600ms per token creation.
     """
-    __slots__ = ('_ct', '_initialized_at', '_ttl', '_lock', '_ready')
+    __slots__ = ('_ct', '_initialized_at', '_ttl', '_lock', '_ready',
+                 '_session_cookies')
 
     def __init__(self):
         self._ct: Optional[ClientTransaction] = None
         self._initialized_at: float = 0
         self._ttl: int = 7200  # 2 hours
-        self._lock = threading.RLock()  # RLock for nested calls
+        self._lock = threading.RLock()
         self._ready = threading.Event()
+        self._session_cookies: Dict[str, str] = {}
 
     def start_background_init(self):
         """Start initialization in background thread."""
@@ -136,13 +139,14 @@ class TransactionIDGenerator:
 
     def _init_sync(self, browser: str = "chrome131"):
         """Initialize the transaction generator (blocking).
-        Uses its own throwaway session to avoid polluting the API session with cookies."""
+        Captures session cookies from the x.com visit as a side effect."""
         try:
             session = requests.Session(impersonate=browser)
             try:
-                # Faster timeout for init - if X is slow, fail fast
                 home = session.get(X_HOME_URL, timeout=_DEFAULT_TIMEOUT)
-                soup = bs4.BeautifulSoup(home.content, "lxml")  # lxml is faster than html.parser
+                # Capture cookies from x.com visit (reused by create_token_set)
+                cookies = {name: value for name, value in session.cookies.items()}
+                soup = bs4.BeautifulSoup(home.content, "lxml")
                 ondemand_url = get_ondemand_file_url(soup)
                 ondemand_js = session.get(ondemand_url, timeout=(_CONNECT_TIMEOUT, 15)).text
             finally:
@@ -151,25 +155,30 @@ class TransactionIDGenerator:
             with self._lock:
                 self._ct = ClientTransaction(soup, ondemand_js)
                 self._initialized_at = time.time()
+                self._session_cookies = cookies
             self._ready.set()
         except Exception as e:
             print(f"[TxnGen] Init error: {e}")
-            self._ready.set()  # Unblock waiters even on failure
+            self._ready.set()
 
     def _ensure_initialized(self):
         """Ensure generator is ready, re-init if TTL expired."""
-        # Fast path: initialized and not expired
         if self._ct is not None and (time.time() - self._initialized_at) < self._ttl:
             return
 
         if not self._ready.is_set():
-            # Wait for background init (max 20s - fail faster)
             self._ready.wait(timeout=20)
             if self._ct is not None:
                 return
 
-        # Need fresh init (TTL expired or background init failed)
         self._init_sync()
+
+    def get_session_cookies(self) -> Dict[str, str]:
+        """Get cached session cookies from the x.com visit.
+        Avoids a second x.com round-trip during token creation."""
+        self._ensure_initialized()
+        with self._lock:
+            return dict(self._session_cookies)
 
     def generate(self, method: str, path: str) -> str:
         """Generate a transaction ID for the given method and path."""
@@ -614,13 +623,9 @@ def create_token_set(
 ) -> Optional[TokenSet]:
     """Create a full guest session for X API requests.
 
-    Steps:
-    1. Visit x.com to collect session cookies (guest_id, cf, etc.)
-    2. Activate a guest token via the API
-    3. Bundle everything into a TokenSet
-
-    The session cookies + guest token + X-Twitter-Client: Guest header
-    are required for SearchTimeline and TweetDetail to work.
+    Uses cached session cookies from the txn generator's x.com visit
+    (eliminates a ~400-600ms round-trip). Only the guest token activation
+    requires a network call (~200-300ms).
 
     Args:
         browser: Browser profile to impersonate
@@ -629,21 +634,21 @@ def create_token_set(
     """
     browser = browser or random.choice(BROWSER_PROFILES)
 
-    # Step 1: Collect session cookies from x.com
-    session_cookies = _collect_session_cookies(browser, session=session, proxy=proxy)
+    # Reuse cookies cached by the txn generator (it already visited x.com)
+    session_cookies = _txn_generator.get_session_cookies()
 
-    # Clear session cookies so they don't interfere with the API call
-    if session:
-        session.cookies.clear()
+    # If txn generator had no cookies (init failed), fall back to direct fetch
+    if not session_cookies:
+        session_cookies = _collect_session_cookies(browser, session=session, proxy=proxy)
+        if session:
+            session.cookies.clear()
 
-    # Step 2: Get guest token
+    # Get guest token (the only network call needed)
     guest_token = get_guest_token(browser, session=session, proxy=proxy)
     if not guest_token:
         return None
 
     csrf_token = secrets.token_hex(16)
-
-    # Extract cf_cookie if present
     cf_cookie = session_cookies.get("__cf_bm")
 
     return TokenSet(
@@ -652,6 +657,21 @@ def create_token_set(
         created_at=time.time(),
         cf_cookie=cf_cookie,
         session_cookies=session_cookies,
+    )
+
+
+def token_set_from_account(account) -> TokenSet:
+    """Create an authenticated TokenSet from an Account object.
+
+    Used for auth-gated endpoints (Search, TweetDetail, Followers, etc.).
+    The Account comes from AccountPool.
+    """
+    return TokenSet(
+        guest_token="",
+        csrf_token="",
+        created_at=time.time(),
+        auth_token=account.auth_token,
+        ct0=account.ct0,
     )
 
 

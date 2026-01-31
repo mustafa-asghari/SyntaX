@@ -7,10 +7,10 @@ import time
 import signal
 import sys
 
-from .client import create_token_set
-from .token_pool import TokenPool, get_pool
-from .proxy_manager import get_proxy_manager
-from .config import TOKEN_CONFIG
+from client import create_token_set
+from token_pool import TokenPool, get_pool
+from proxy_manager import get_proxy_manager
+from config import TOKEN_CONFIG
 
 
 class TokenManager:
