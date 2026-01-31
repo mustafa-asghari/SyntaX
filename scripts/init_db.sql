@@ -73,6 +73,19 @@ CREATE TABLE IF NOT EXISTS query_ids (
 ) ENGINE = ReplacingMergeTree(discovered_at)
 ORDER BY operation_name;
 
+-- Search query analytics (cache performance tracking)
+CREATE TABLE IF NOT EXISTS search_queries (
+    query String,
+    product String,
+    result_count UInt16,
+    cache_hit UInt8,
+    response_time_ms Float32,
+    created_at DateTime64(3) DEFAULT now64(3)
+) ENGINE = MergeTree()
+ORDER BY (created_at, query)
+PARTITION BY toYYYYMMDD(created_at)
+TTL created_at + INTERVAL 90 DAY;
+
 -- Token health metrics
 CREATE TABLE IF NOT EXISTS token_metrics (
     token_id String,

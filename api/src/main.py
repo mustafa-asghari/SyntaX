@@ -3,6 +3,7 @@ SyntaX API
 High-performance X/Twitter data API.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -24,6 +25,10 @@ from endpoints.user import get_user_by_username, get_user_by_id
 from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
 from endpoints.search import search_tweets
 from endpoints.social import get_followers, get_following
+
+from cache import CacheManager
+from cache.redis_cache import make_key
+from cache.config import CacheConfig
 
 
 # Response models
@@ -83,6 +88,7 @@ class SessionPool:
 pool: Optional[AnyTokenPool] = None
 session_pool: Optional[SessionPool] = None
 _proxy_manager = None
+cache_mgr: Optional[CacheManager] = None
 
 
 def _get_client():
@@ -108,7 +114,7 @@ def _get_client():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global pool, session_pool, _proxy_manager
+    global pool, session_pool, _proxy_manager, cache_mgr
 
     print("Starting SyntaX API...")
 
@@ -135,9 +141,15 @@ async def lifespan(app: FastAPI):
                 print(f"  Created token {i+1}/5")
         print(f"Pool size: {pool.pool_size()}")
 
+    # Initialize cache
+    cache_mgr = CacheManager()
+    await cache_mgr.connect()
+
     yield
 
     print("Shutting down SyntaX API...")
+    if cache_mgr:
+        await cache_mgr.close()
     if session_pool:
         session_pool.close_all()
     if pool:
@@ -176,6 +188,9 @@ async def health():
     return {
         "status": "healthy",
         "pool_size": pool.pool_size() if pool else 0,
+        "cache_redis": cache_mgr.redis.connected if cache_mgr else False,
+        "cache_typesense": cache_mgr.typesense.available if cache_mgr else False,
+        "cache_clickhouse": cache_mgr.clickhouse.available if cache_mgr else False,
     }
 
 
@@ -183,134 +198,178 @@ async def health():
 
 
 @app.get("/v1/users/{username}", response_model=APIResponse)
-async def get_user(username: str):
+async def get_user(
+    username: str,
+    fresh: bool = Query(default=False, description="Bypass cache"),
+):
     """Get user profile by username."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("profile", username.lower())
 
-    try:
-        user, api_time = get_user_by_username(username, client)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            user, api_time = await asyncio.to_thread(get_user_by_username, username, client)
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            if not user:
+                raise HTTPException(status_code=404, detail=f"User @{username} not found")
+            return user.to_dict()
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-        if pool:
-            pool.return_token(token_set, success=True)
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_PROFILE, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
 
-        if not user:
-            raise HTTPException(status_code=404, detail=f"User @{username} not found")
-
-        return APIResponse(
-            success=True,
-            data=user.to_dict(),
-            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    return APIResponse(
+        success=True,
+        data=data,
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 @app.get("/v1/users/id/{user_id}", response_model=APIResponse)
-async def get_user_by_rest_id(user_id: str):
+async def get_user_by_rest_id(
+    user_id: str,
+    fresh: bool = Query(default=False, description="Bypass cache"),
+):
     """Get user profile by numeric user ID."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("profile", user_id)
 
-    try:
-        user, api_time = get_user_by_id(user_id, client)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            user, api_time = await asyncio.to_thread(get_user_by_id, user_id, client)
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            if not user:
+                raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+            return user.to_dict()
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-        if pool:
-            pool.return_token(token_set, success=True)
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_PROFILE, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
 
-        if not user:
-            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-
-        return APIResponse(
-            success=True,
-            data=user.to_dict(),
-            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    return APIResponse(
+        success=True,
+        data=data,
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 # ── Tweet Endpoints ─────────────────────────────────────────
 
 
 @app.get("/v1/tweets/{tweet_id}", response_model=APIResponse)
-async def get_tweet(tweet_id: str):
+async def get_tweet(
+    tweet_id: str,
+    fresh: bool = Query(default=False, description="Bypass cache"),
+):
     """Get a single tweet by ID."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("tweet", tweet_id)
 
-    try:
-        tweet, api_time = get_tweet_by_id(tweet_id, client)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            tweet, api_time = await asyncio.to_thread(get_tweet_by_id, tweet_id, client)
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            if not tweet:
+                raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
+            return tweet.to_dict()
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-        if pool:
-            pool.return_token(token_set, success=True)
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_TWEET, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
 
-        if not tweet:
-            raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
-
-        return APIResponse(
-            success=True,
-            data=tweet.to_dict(),
-            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    return APIResponse(
+        success=True,
+        data=data,
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 @app.get("/v1/tweets/{tweet_id}/detail", response_model=APIResponse)
-async def get_tweet_with_replies(tweet_id: str):
+async def get_tweet_with_replies(
+    tweet_id: str,
+    fresh: bool = Query(default=False, description="Bypass cache"),
+):
     """Get tweet detail with conversation thread."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("tweet_detail", tweet_id)
 
-    try:
-        main_tweet, replies, api_time = get_tweet_detail(tweet_id, client)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
-
-        if pool:
-            pool.return_token(token_set, success=True)
-
-        if not main_tweet:
-            raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
-
-        return APIResponse(
-            success=True,
-            data={
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            main_tweet, replies, api_time = await asyncio.to_thread(get_tweet_detail, tweet_id, client)
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            if not main_tweet:
+                raise HTTPException(status_code=404, detail=f"Tweet {tweet_id} not found")
+            return {
                 "tweet": main_tweet.to_dict(),
                 "replies": [r.to_dict() for r in replies],
                 "reply_count": len(replies),
-            },
-            meta={"response_time_ms": round(total_time, 1), "x_api_time_ms": round(api_time, 1)},
-        )
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_TWEET_DETAIL, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
+
+    return APIResponse(
+        success=True,
+        data=data,
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 @app.get("/v1/users/{user_id}/tweets", response_model=APIResponse)
@@ -318,36 +377,48 @@ async def get_tweets_by_user(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
+    fresh: bool = Query(default=False, description="Bypass cache"),
 ):
     """Get tweets from a user's timeline. Requires numeric user_id."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("user_tweets", user_id, str(count), str(cursor or ""))
 
-    try:
-        tweets, next_cursor, api_time = get_user_tweets(user_id, client, count=count, cursor=cursor)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
-
-        if pool:
-            pool.return_token(token_set, success=True)
-
-        return APIResponse(
-            success=True,
-            data=[t.to_dict() for t in tweets],
-            meta={
-                "response_time_ms": round(total_time, 1),
-                "x_api_time_ms": round(api_time, 1),
-                "count": len(tweets),
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            tweets, next_cursor, api_time = await asyncio.to_thread(
+                get_user_tweets, user_id, client, count, cursor,
+            )
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            return {
+                "tweets": [t.to_dict() for t in tweets],
                 "next_cursor": next_cursor,
-            },
-        )
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_USER_TWEETS, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
+
+    return APIResponse(
+        success=True,
+        data=data["tweets"],
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "count": len(data["tweets"]),
+            "next_cursor": data.get("next_cursor"),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 # ── Search Endpoints ────────────────────────────────────────
@@ -359,36 +430,49 @@ async def search(
     count: int = Query(default=20, le=40),
     product: str = Query(default="Top", description="Top, Latest, People, Photos, Videos"),
     cursor: Optional[str] = Query(default=None),
+    fresh: bool = Query(default=False, description="Bypass cache"),
 ):
     """Search for tweets."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
 
-    try:
-        tweets, next_cursor, api_time = search_tweets(q, client, count=count, product=product, cursor=cursor)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            tweets, next_cursor, api_time = await asyncio.to_thread(
+                search_tweets, q, client, count, product, cursor,
+            )
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            return [t.to_dict() for t in tweets], next_cursor
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-        if pool:
-            pool.return_token(token_set, success=True)
+    tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
+        query=q,
+        product=product,
+        count=count,
+        cursor=cursor,
+        fetch_fn=_fetch,
+        fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
 
-        return APIResponse(
-            success=True,
-            data=[t.to_dict() for t in tweets],
-            meta={
-                "response_time_ms": round(total_time, 1),
-                "x_api_time_ms": round(api_time, 1),
-                "count": len(tweets),
-                "next_cursor": next_cursor,
-            },
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    return APIResponse(
+        success=True,
+        data=tweet_dicts,
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "count": len(tweet_dicts),
+            "next_cursor": next_cursor,
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 # ── Social Endpoints ────────────────────────────────────────
@@ -399,36 +483,48 @@ async def get_user_followers(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
+    fresh: bool = Query(default=False, description="Bypass cache"),
 ):
     """Get a user's followers. Requires numeric user_id. Auth-gated."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("social", "followers", user_id, str(count), str(cursor or ""))
 
-    try:
-        users, next_cursor, api_time = get_followers(user_id, client, count=count, cursor=cursor)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
-
-        if pool:
-            pool.return_token(token_set, success=True)
-
-        return APIResponse(
-            success=True,
-            data=[u.to_dict() for u in users],
-            meta={
-                "response_time_ms": round(total_time, 1),
-                "x_api_time_ms": round(api_time, 1),
-                "count": len(users),
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            users, next_cursor, api_time = await asyncio.to_thread(
+                get_followers, user_id, client, count, cursor,
+            )
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            return {
+                "users": [u.to_dict() for u in users],
                 "next_cursor": next_cursor,
-            },
-        )
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_SOCIAL, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
+
+    return APIResponse(
+        success=True,
+        data=data["users"],
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "count": len(data["users"]),
+            "next_cursor": data.get("next_cursor"),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 @app.get("/v1/users/{user_id}/following", response_model=APIResponse)
@@ -436,36 +532,48 @@ async def get_user_following(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
+    fresh: bool = Query(default=False, description="Bypass cache"),
 ):
     """Get users that a user follows. Requires numeric user_id. Auth-gated."""
     start_time = time.perf_counter()
-    client, token_set = _get_client()
+    cache_key = make_key("social", "following", user_id, str(count), str(cursor or ""))
 
-    try:
-        users, next_cursor, api_time = get_following(user_id, client, count=count, cursor=cursor)
-        client.close()
-        total_time = (time.perf_counter() - start_time) * 1000
-
-        if pool:
-            pool.return_token(token_set, success=True)
-
-        return APIResponse(
-            success=True,
-            data=[u.to_dict() for u in users],
-            meta={
-                "response_time_ms": round(total_time, 1),
-                "x_api_time_ms": round(api_time, 1),
-                "count": len(users),
+    async def _fetch():
+        client, token_set = _get_client()
+        try:
+            users, next_cursor, api_time = await asyncio.to_thread(
+                get_following, user_id, client, count, cursor,
+            )
+            client.close()
+            if pool:
+                pool.return_token(token_set, success=True)
+            return {
+                "users": [u.to_dict() for u in users],
                 "next_cursor": next_cursor,
-            },
-        )
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            if pool:
+                pool.return_token(token_set, success=False)
+            raise HTTPException(status_code=500, detail=str(e))
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        if pool:
-            pool.return_token(token_set, success=False)
-        raise HTTPException(status_code=500, detail=str(e))
+    data, cache_layer = await cache_mgr.get_or_fetch(
+        cache_key, CacheConfig.TTL_SOCIAL, _fetch, fresh=fresh,
+    )
+    total_time = (time.perf_counter() - start_time) * 1000
+
+    return APIResponse(
+        success=True,
+        data=data["users"],
+        meta={
+            "response_time_ms": round(total_time, 1),
+            "count": len(data["users"]),
+            "next_cursor": data.get("next_cursor"),
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    )
 
 
 # ── Admin Endpoints ─────────────────────────────────────────

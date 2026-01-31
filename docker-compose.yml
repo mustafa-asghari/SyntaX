@@ -32,6 +32,22 @@ services:
       timeout: 3s
       retries: 5
 
+  # Typesense - Full-text search engine (L2 cache for tweets)
+  typesense:
+    image: typesense/typesense:27.1
+    ports:
+      - "8108:8108"
+    volumes:
+      - typesense_data:/data
+    environment:
+      - TYPESENSE_API_KEY=syntax-typesense-key
+      - TYPESENSE_DATA_DIR=/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8108/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # Scraper service for testing
   scraper:
     build: ./scraper
@@ -45,3 +61,4 @@ services:
 volumes:
   redis_data:
   clickhouse_data:
+  typesense_data:
