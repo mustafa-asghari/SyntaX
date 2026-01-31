@@ -21,4 +21,5 @@ MISSING_FEATURES.md
 .claude
 .claude/settings.json
 .claude/config.json
+accounts.json
 .claude/skills.json
