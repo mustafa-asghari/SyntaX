@@ -90,6 +90,7 @@ class TypesenseCache:
             self._available = False
             print(f"[cache] Typesense protocol invalid: {CacheConfig.TYPESENSE_PROTOCOL}")
             return
+        print(f"[cache] Typesense connecting to {self._base_url}")
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"X-TYPESENSE-API-KEY": self._api_key},
@@ -103,7 +104,7 @@ class TypesenseCache:
             else:
                 print(f"[cache] Typesense health check failed: {resp.status_code}")
         except Exception as e:
-            print(f"[cache] Typesense unavailable: {e}")
+            print(f"[cache] Typesense unavailable ({type(e).__name__}): {e!r}")
             self._available = False
 
     async def close(self) -> None:

@@ -122,7 +122,7 @@ class CacheManager:
                 if got_lock:
                     try:
                         data = await fetch_fn()
-                        asyncio.create_task(self.redis.set(cache_key, data, ttl))
+                        await self.redis.set(cache_key, data, ttl)
                         return data, "live"
                     finally:
                         await self.redis.release_lock(lock_key)
@@ -137,8 +137,8 @@ class CacheManager:
 
             # Fallback: in-process coalescing only
             (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
-            # Fire-and-forget: write cache in background, return immediately
-            asyncio.create_task(self.redis.set(cache_key, data, ttl))
+            if not coalesced:
+                asyncio.create_task(self.redis.set(cache_key, data, ttl))
             return data, "coalesced" if coalesced else "live"
 
         # Try Redis L1
@@ -158,7 +158,7 @@ class CacheManager:
             if got_lock:
                 try:
                     data = await fetch_fn()
-                    asyncio.create_task(self.redis.set(cache_key, data, ttl))
+                    await self.redis.set(cache_key, data, ttl)
                     return data, "live"
                 finally:
                     await self.redis.release_lock(lock_key)
@@ -218,7 +218,7 @@ class CacheManager:
                 if got_lock:
                     try:
                         tweet_dicts, next_cursor = await fetch_fn()
-                        asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+                        await self._write_through_search(cache_key, tweet_dicts, next_cursor)
                         self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
                         return tweet_dicts, next_cursor, "live"
                     finally:
@@ -275,7 +275,7 @@ class CacheManager:
             if got_lock:
                 try:
                     tweet_dicts, next_cursor = await fetch_fn()
-                    asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+                    await self._write_through_search(cache_key, tweet_dicts, next_cursor)
                     self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
                     return tweet_dicts, next_cursor, "live"
                 finally:
