@@ -7,7 +7,9 @@ Auto-creates the `tweets` collection on startup. Provides:
 """
 
 import time
+import os
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -77,6 +79,17 @@ class TypesenseCache:
             self._available = False
             print("[cache] Typesense disabled")
             return
+        raw_url = os.getenv("TYPESENSE_URL", "").strip()
+        if raw_url:
+            parsed = urlparse(raw_url if "://" in raw_url else f"http://{raw_url}")
+            if not parsed.hostname or parsed.scheme not in ("http", "https"):
+                self._available = False
+                print(f"[cache] Typesense URL invalid: {raw_url}")
+                return
+        if CacheConfig.TYPESENSE_PROTOCOL not in ("http", "https"):
+            self._available = False
+            print(f"[cache] Typesense protocol invalid: {CacheConfig.TYPESENSE_PROTOCOL}")
+            return
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"X-TYPESENSE-API-KEY": self._api_key},
@@ -87,6 +100,8 @@ class TypesenseCache:
             if resp.status_code == 200:
                 self._available = True
                 await self._ensure_collection()
+            else:
+                print(f"[cache] Typesense health check failed: {resp.status_code}")
         except Exception as e:
             print(f"[cache] Typesense unavailable: {e}")
             self._available = False
