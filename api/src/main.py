@@ -50,19 +50,33 @@ from collections import deque
 from curl_cffi import requests as curl_requests
 
 
+def _proxy_key(proxy: Optional[dict]) -> str:
+    """Stable string key for a proxy dict (or '' for direct)."""
+    if not proxy:
+        return ""
+    return proxy.get("https") or proxy.get("http") or ""
+
+
 class SessionPool:
     """
-    Reuses curl-cffi sessions across API requests to skip the 200-400ms
-    TLS handshake on every call.  Sessions are pre-warmed with a TLS
-    handshake to api.x.com on creation so the first real request is fast.
+    Proxy-aware pool of curl-cffi sessions.
+
+    Sessions are bucketed by proxy URL so a session warmed through proxy A
+    is never handed out for proxy B.  libcurl keeps a per-handle connection
+    cache (DNS → TCP → TLS); reusing the same handle for the same proxy
+    skips all three setup steps.
     """
 
     _PREWARM_URL = "https://api.x.com/"
     _PREWARM_TIMEOUT = (5, 2)
 
-    def __init__(self, max_size: int = 8):
-        self._pool: deque = deque()
-        self._max_size = max_size
+    def __init__(self, max_per_proxy: int = 0):
+        # max_per_proxy=0 means "read from env at first use"
+        self._max_per_proxy = max_per_proxy or int(
+            os.environ.get("SESSION_POOL_SIZE", "8")
+        )
+        # proxy_key → deque[Session]
+        self._buckets: dict[str, deque] = {}
         self._lock = threading.Lock()
 
     def _create_warm_session(
@@ -85,42 +99,50 @@ class SessionPool:
 
     def prewarm(self, count: int = 4, browser: str = "chrome131",
                 proxy: Optional[dict] = None) -> None:
-        """Pre-warm *count* sessions and add them to the pool."""
+        """Pre-warm *count* sessions for a specific proxy (or direct)."""
+        key = _proxy_key(proxy)
         for _ in range(count):
             session = self._create_warm_session(browser, proxy)
             with self._lock:
-                if len(self._pool) < self._max_size:
-                    self._pool.append(session)
+                bucket = self._buckets.setdefault(key, deque())
+                if len(bucket) < self._max_per_proxy:
+                    bucket.append(session)
                 else:
                     session.close()
-        print(f"[SessionPool] Pre-warmed {count} sessions")
+        print(f"[SessionPool] Pre-warmed {count} sessions (proxy={'direct' if not key else key[:40]})")
 
     def acquire(self, browser: str = "chrome131", proxy: Optional[dict] = None) -> curl_requests.Session:
+        key = _proxy_key(proxy)
         with self._lock:
-            if self._pool:
-                session = self._pool.popleft()
+            bucket = self._buckets.get(key)
+            if bucket:
+                session = bucket.popleft()
+                if not bucket:
+                    del self._buckets[key]
                 session.cookies.clear()
                 return session
-        # Pool empty — plain session (no HEAD prewarm).  The TLS handshake
-        # will happen on the real API request; an extra HEAD would only add latency.
+        # Pool empty for this proxy — plain session, TLS on first real request
         session = curl_requests.Session(impersonate=browser)
         if proxy:
             session.proxies = proxy
         return session
 
-    def release(self, session: curl_requests.Session) -> None:
+    def release(self, session: curl_requests.Session, proxy: Optional[dict] = None) -> None:
         session.cookies.clear()
+        key = _proxy_key(proxy)
         with self._lock:
-            if len(self._pool) < self._max_size:
-                self._pool.append(session)
+            bucket = self._buckets.setdefault(key, deque())
+            if len(bucket) < self._max_per_proxy:
+                bucket.append(session)
                 return
-        # Pool full — close the session
         session.close()
 
     def close_all(self) -> None:
         with self._lock:
-            while self._pool:
-                self._pool.pop().close()
+            for bucket in self._buckets.values():
+                while bucket:
+                    bucket.pop().close()
+            self._buckets.clear()
 
 
 # Globals
@@ -163,7 +185,7 @@ def _get_client():
     session = session_pool.acquire(proxy=proxy) if session_pool else None
     client = XClient(token_set=token_set, proxy=proxy, token_pool_ref=pool,
                      session=session)
-    return client, token_set, session
+    return client, token_set, session, proxy
 
 
 @asynccontextmanager
@@ -270,7 +292,7 @@ async def get_user(
     cache_key = make_key("profile", username.lower())
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             user, api_time = await asyncio.to_thread(get_user_by_username, username, client)
             if pool:
@@ -287,7 +309,7 @@ async def get_user(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_PROFILE, _fetch, fresh=fresh,
@@ -315,7 +337,7 @@ async def get_user_by_rest_id(
     cache_key = make_key("profile", user_id)
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             user, api_time = await asyncio.to_thread(get_user_by_id, user_id, client)
             if pool:
@@ -332,7 +354,7 @@ async def get_user_by_rest_id(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_PROFILE, _fetch, fresh=fresh,
@@ -363,7 +385,7 @@ async def get_tweet(
     cache_key = make_key("tweet", tweet_id)
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             tweet, api_time = await asyncio.to_thread(get_tweet_by_id, tweet_id, client)
             if pool:
@@ -380,7 +402,7 @@ async def get_tweet(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_TWEET, _fetch, fresh=fresh,
@@ -408,7 +430,7 @@ async def get_tweet_with_replies(
     cache_key = make_key("tweet_detail", tweet_id)
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             main_tweet, replies, api_time = await asyncio.to_thread(get_tweet_detail, tweet_id, client)
             if pool:
@@ -429,7 +451,7 @@ async def get_tweet_with_replies(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_TWEET_DETAIL, _fetch, fresh=fresh,
@@ -459,7 +481,7 @@ async def get_tweets_by_user(
     cache_key = make_key("user_tweets", user_id, str(count), str(cursor or ""))
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             tweets, next_cursor, api_time = await asyncio.to_thread(
                 get_user_tweets, user_id, client, count, cursor,
@@ -479,7 +501,7 @@ async def get_tweets_by_user(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_USER_TWEETS, _fetch, fresh=fresh,
@@ -514,7 +536,7 @@ async def search(
     start_time = time.perf_counter()
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             tweets, next_cursor, api_time = await asyncio.to_thread(
                 search_tweets, q, client, count, product, cursor,
@@ -531,7 +553,7 @@ async def search(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
         query=q,
@@ -571,7 +593,7 @@ async def get_user_followers(
     cache_key = make_key("social", "followers", user_id, str(count), str(cursor or ""))
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             users, next_cursor, api_time = await asyncio.to_thread(
                 get_followers, user_id, client, count, cursor,
@@ -591,7 +613,7 @@ async def get_user_followers(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_SOCIAL, _fetch, fresh=fresh,
@@ -623,7 +645,7 @@ async def get_user_following(
     cache_key = make_key("social", "following", user_id, str(count), str(cursor or ""))
 
     async def _fetch():
-        client, token_set, session = _get_client()
+        client, token_set, session, proxy = _get_client()
         try:
             users, next_cursor, api_time = await asyncio.to_thread(
                 get_following, user_id, client, count, cursor,
@@ -643,7 +665,7 @@ async def get_user_following(
         finally:
             client.close()
             if session and session_pool:
-                session_pool.release(session)
+                session_pool.release(session, proxy=proxy)
 
     data, cache_layer = await cache_mgr.get_or_fetch(
         cache_key, CacheConfig.TTL_SOCIAL, _fetch, fresh=fresh,
