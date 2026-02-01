@@ -70,13 +70,22 @@ class Account:
         return session
 
     def acquire_session(self) -> curl_requests.Session:
-        """Pop a warm session from the pool, or create a new one."""
+        """Pop a warm session from the pool, or create a plain one.
+
+        On-demand sessions skip the HEAD prewarm — the TLS handshake
+        will happen on the real API request anyway, so an extra HEAD
+        would only add latency.
+        """
         with self._session_lock:
             if self._sessions:
                 session = self._sessions.popleft()
                 session.cookies.clear()
                 return session
-        return self._create_warm_session()
+        # Pool empty — plain session (no HEAD), TLS handshakes on first real request
+        session = curl_requests.Session(impersonate="chrome131")
+        if self.proxy:
+            session.proxies = self.proxy_dict
+        return session
 
     def release_session(self, session: curl_requests.Session) -> None:
         """Return a session to the pool (or close it if pool is full)."""

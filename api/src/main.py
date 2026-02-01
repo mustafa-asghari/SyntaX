@@ -25,6 +25,7 @@ from endpoints.user import get_user_by_username, get_user_by_id
 from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
 from endpoints.search import search_tweets
 from endpoints.social import get_followers, get_following
+from account_pool import get_account_pool
 
 # Add api/src to path for cache package imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -100,8 +101,12 @@ class SessionPool:
                 session = self._pool.popleft()
                 session.cookies.clear()
                 return session
-        # Pool empty — create a warm session on-demand
-        return self._create_warm_session(browser, proxy)
+        # Pool empty — plain session (no HEAD prewarm).  The TLS handshake
+        # will happen on the real API request; an extra HEAD would only add latency.
+        session = curl_requests.Session(impersonate=browser)
+        if proxy:
+            session.proxies = proxy
+        return session
 
     def release(self, session: curl_requests.Session) -> None:
         session.cookies.clear()
@@ -169,6 +174,11 @@ async def lifespan(app: FastAPI):
 
     # Pre-warm TLS sessions so first requests are fast
     session_pool.prewarm(count=4)
+
+    # Pre-warm auth account sessions (for search, tweet detail, social)
+    acct_pool = get_account_pool()
+    if acct_pool.has_accounts:
+        acct_pool.prewarm_all(sessions_per_account=2)
 
     print(f"Token pool initialized (size: {pool.pool_size()})")
 
