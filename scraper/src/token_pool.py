@@ -149,6 +149,7 @@ class TokenPool:
         token_id = f"{int(token_set.created_at * 1000)}"
 
         # Store token data
+        proxy_url = token_set.proxy_key
         self.redis_client.hset(
             self._token_key(token_id),
             mapping={
@@ -157,6 +158,7 @@ class TokenPool:
                 "created_at": str(token_set.created_at),
                 "cf_cookie": token_set.cf_cookie or "",
                 "request_count": str(token_set.request_count),
+                "proxy_url": proxy_url,
             }
         )
 
@@ -192,12 +194,15 @@ class TokenPool:
         if not data:
             return None
 
+        proxy_url = data.get("proxy_url") or None
+        proxy = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         token_set = TokenSet(
             guest_token=data["guest_token"],
             csrf_token=data["csrf_token"],
             created_at=float(data["created_at"]),
             cf_cookie=data.get("cf_cookie") or None,
             request_count=int(data.get("request_count", 0)),
+            proxy=proxy,
         )
 
         # Check if token is still valid

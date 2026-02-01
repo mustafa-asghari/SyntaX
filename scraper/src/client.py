@@ -81,10 +81,21 @@ class TokenSet:
     # guest_id_marketing, guest_id_ads, personalization_id, __cf_bm, etc.
     # These are required for SearchTimeline and TweetDetail with guest tokens.
     session_cookies: Optional[Dict[str, str]] = None
+    # Proxy used to mint this token — reuse the same proxy when consuming
+    # so the TLS connection cache in libcurl is effective and the IP stays
+    # consistent with the token's trust pool.
+    proxy: Optional[Dict[str, str]] = None
 
     @property
     def is_authenticated(self) -> bool:
         return bool(self.auth_token and self.ct0)
+
+    @property
+    def proxy_key(self) -> str:
+        """Stable string key for this token's proxy (used for session pool lookups)."""
+        if not self.proxy:
+            return ""
+        return self.proxy.get("https") or self.proxy.get("http") or ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -94,10 +105,13 @@ class TokenSet:
             "cf_cookie": self.cf_cookie or "",
             "request_count": self.request_count,
             "session_cookies": self.session_cookies or {},
+            "proxy": self.proxy or {},
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TokenSet":
+        proxy_raw = data.get("proxy")
+        proxy = proxy_raw if isinstance(proxy_raw, dict) and proxy_raw else None
         return cls(
             guest_token=data["guest_token"],
             csrf_token=data["csrf_token"],
@@ -105,6 +119,7 @@ class TokenSet:
             cf_cookie=data.get("cf_cookie") or None,
             request_count=int(data.get("request_count", 0)),
             session_cookies=data.get("session_cookies") or None,
+            proxy=proxy,
         )
 
 
@@ -661,6 +676,7 @@ def create_token_set(
         created_at=time.time(),
         cf_cookie=cf_cookie,
         session_cookies=session_cookies,
+        proxy=proxy,
     )
 
 

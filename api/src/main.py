@@ -136,22 +136,30 @@ def _get_client():
     Returns (client, token_set, session) where *session* is a warm
     curl-cffi session borrowed from the SessionPool.  The caller MUST
     release it back via ``session_pool.release(session)`` when done.
+
+    Proxy affinity: if the token was minted via a specific proxy, that
+    same proxy is reused so libcurl's per-handle connection cache
+    (DNS/TCP/TLS) stays warm.
     """
     token_set = pool.get_token() if pool else None
 
-    # Determine proxy
-    proxy = None
-    if _proxy_manager and _proxy_manager.has_proxies:
-        proxy_cfg = _proxy_manager.get_proxy()
-        if proxy_cfg:
-            proxy = proxy_cfg.to_curl_cffi_format()
+    if token_set and token_set.proxy:
+        # Honour the proxy the token was minted with
+        proxy = token_set.proxy
+    else:
+        # No token yet, or token has no proxy — pick one now
+        proxy = None
+        if _proxy_manager and _proxy_manager.has_proxies:
+            proxy_cfg = _proxy_manager.get_proxy()
+            if proxy_cfg:
+                proxy = proxy_cfg.to_curl_cffi_format()
 
     if not token_set:
         token_set = create_token_set(proxy=proxy)
         if not token_set:
             raise HTTPException(status_code=503, detail="Unable to create authentication token")
 
-    # Borrow a TLS-warm session from the pool
+    # Borrow a TLS-warm session from the pool, keyed by proxy
     session = session_pool.acquire(proxy=proxy) if session_pool else None
     client = XClient(token_set=token_set, proxy=proxy, token_pool_ref=pool,
                      session=session)
