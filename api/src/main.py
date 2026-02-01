@@ -198,12 +198,13 @@ async def lifespan(app: FastAPI):
         print(f"Proxy manager loaded ({_proxy_manager.count} proxies)")
 
     # Pre-warm TLS sessions so first requests are fast
-    session_pool.prewarm(count=4)
+    session_pool.prewarm(count=8)
 
     # Pre-warm auth account sessions (for search, tweet detail, social)
+    # Higher count avoids cold TLS handshakes (~700ms) under concurrent load
     acct_pool = get_account_pool()
     if acct_pool.has_accounts:
-        acct_pool.prewarm_all(sessions_per_account=2)
+        acct_pool.prewarm_all(sessions_per_account=8)
 
     print(f"Token pool initialized (size: {pool.pool_size()})")
 
@@ -542,24 +543,49 @@ async def search(
     start_time = time.perf_counter()
 
     async def _fetch():
-        client, token_set, session, proxy = _get_client()
-        try:
-            tweets, next_cursor, api_time = await asyncio.to_thread(
-                search_tweets, q, client, count, product, cursor,
-            )
-            if pool:
-                pool.return_token(token_set, success=True)
-            return [t.to_dict() for t in tweets], next_cursor
-        except HTTPException:
-            raise
-        except Exception as e:
-            if pool:
-                pool.return_token(token_set, success=False)
-            raise HTTPException(status_code=500, detail=str(e))
-        finally:
-            client.close()
-            if session and session_pool:
-                session_pool.release(session, proxy=proxy)
+        # Search is auth-gated — skip guest token, go straight to account pool.
+        # search_tweets() handles account acquisition internally.
+        acct_pool = get_account_pool()
+        account = acct_pool.acquire() if acct_pool.has_accounts else None
+
+        if account:
+            # Fast path: use account's pre-warmed session directly
+            from client import token_set_from_account
+            auth_ts = token_set_from_account(account)
+            session = account.acquire_session()
+            auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
+                                  session=session)
+            try:
+                tweets, next_cursor, api_time = await asyncio.to_thread(
+                    search_tweets, q, auth_client, count, product, cursor,
+                )
+                acct_pool.release(account, success=True, status_code=200)
+                return [t.to_dict() for t in tweets], next_cursor
+            except Exception as e:
+                status = 429 if "429" in str(e) else 403 if "403" in str(e) else 500
+                acct_pool.release(account, success=False, status_code=status)
+                raise HTTPException(status_code=status, detail=str(e))
+            finally:
+                auth_client.close()
+                account.release_session(session)
+        else:
+            # No accounts — fall back to guest token (will likely fail for search)
+            client, token_set, session, proxy = _get_client()
+            try:
+                tweets, next_cursor, api_time = await asyncio.to_thread(
+                    search_tweets, q, client, count, product, cursor,
+                )
+                if pool:
+                    pool.return_token(token_set, success=True)
+                return [t.to_dict() for t in tweets], next_cursor
+            except Exception as e:
+                if pool:
+                    pool.return_token(token_set, success=False)
+                raise HTTPException(status_code=500, detail=str(e))
+            finally:
+                client.close()
+                if session and session_pool:
+                    session_pool.release(session, proxy=proxy)
 
     tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
         query=q,

@@ -24,7 +24,7 @@ from config import TOKEN_CONFIG
 _PREWARM_URL = "https://api.x.com/"
 _PREWARM_TIMEOUT = (5, 2)
 import os as _os
-_MAX_SESSIONS_PER_ACCOUNT = int(_os.environ.get("MAX_SESSIONS_PER_ACCOUNT", "4"))
+_MAX_SESSIONS_PER_ACCOUNT = int(_os.environ.get("MAX_SESSIONS_PER_ACCOUNT", "10"))
 
 
 @dataclass
