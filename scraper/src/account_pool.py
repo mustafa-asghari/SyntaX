@@ -153,16 +153,42 @@ class AccountPool:
         return cls(accounts)
 
     @classmethod
+    def from_json_string(cls, raw: str) -> "AccountPool":
+        """Load accounts from a JSON string (e.g. from an env var)."""
+        data = json.loads(raw)
+        accounts = []
+        for entry in data:
+            accounts.append(Account(
+                auth_token=entry["auth_token"],
+                ct0=entry["ct0"],
+                label=entry.get("label", f"account-{len(accounts)+1}"),
+                proxy=entry.get("proxy"),
+            ))
+        print(f"[AccountPool] Loaded {len(accounts)} accounts from env")
+        return cls(accounts)
+
+    @classmethod
     def from_env(cls) -> "AccountPool":
-        """Load accounts from environment or default file paths."""
+        """Load accounts from environment or default file paths.
+
+        Priority:
+        1. ACCOUNTS_JSON env var  — raw JSON string (for cloud deploys)
+        2. ACCOUNTS_FILE env var  — path to a JSON file
+        3. Default file locations — accounts.json in project root or scraper/src
+        """
         import os
 
-        # Check for accounts file path in env
+        # 1. Raw JSON in env var (Railway, Render, Fly, etc.)
+        raw = os.environ.get("ACCOUNTS_JSON", "")
+        if raw:
+            return cls.from_json_string(raw)
+
+        # 2. Check for accounts file path in env
         path = os.environ.get("ACCOUNTS_FILE", "")
         if path and Path(path).exists():
             return cls.from_file(path)
 
-        # Try default locations
+        # 3. Try default locations
         for default in [
             Path(__file__).resolve().parent.parent.parent / "accounts.json",
             Path(__file__).resolve().parent / "accounts.json",

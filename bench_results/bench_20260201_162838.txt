@@ -1,0 +1,24 @@
+SyntaX Benchmark — 2026-02-01 16:28:38
+============================================================
+
+[16:28:10] --- Testing Local API (Query: benchmark_1769927290) ---
+[16:28:11] 1. Cold Live Fetch: 856.66ms (E2E) | 854.5ms (Server) | Layer: live | Status: 200
+[16:28:11] 2. Redis Hit:       4.56ms (E2E) | 1.2ms (Server) | Layer: redis | Status: 200
+[16:28:11] 3. Force Fresh:     3.97ms (E2E) | 1.7ms (Server) | Layer: coalesced | Status: 200
+[16:28:11] 
+--- Testing Local Request Coalescing (10 concurrent) ---
+[16:28:12] Stats: Avg 823ms | P50 824ms | P99 825ms
+[16:28:12] Layers: live=1 coalesced=9 redis=0 (live should be 1)
+[16:28:13] --- Testing Railway API (Query: benchmark_1769927293) ---
+[16:28:14] 1. Cold Live Fetch: 818.80ms (E2E) | 494.9ms (Server) | Layer: live | Status: 200
+[16:28:14] 2. Redis Hit:       231.72ms (E2E) | 2.5ms (Server) | Layer: redis | Status: 200
+[16:28:15] 3. Force Fresh:     462.65ms (E2E) | 231.0ms (Server) | Layer: live | Status: 200
+[16:28:15] 
+--- Testing Railway Request Coalescing (10 concurrent) ---
+[16:28:22] Stats: Avg 645ms | P50 682ms | P99 688ms
+[16:28:22] Layers: live=1 coalesced=9 redis=0 (live should be 1)
+[16:28:22] 
+--- Testing Competitor API ---
+[16:28:25] 1. Cold Fetch:      1637.17ms | Status: 200
+[16:28:31] 2. Cached Fetch:    1057.42ms | Status: 200
+[16:28:38] 3. Common Query:    1860.46ms | Status: 200
