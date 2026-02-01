@@ -27,7 +27,7 @@ COPY scripts/ ./scripts/
 # - /app/api       → so "src.main" resolves to api/src/main.py
 # - /app/scraper/src → so "from client import ..." works (scraper absolute imports)
 # - /app/api/src   → so "from cache import ..." works
-ENV PYTHONPATH="/app/api:/app/scraper/src:/app/api/src"
+ENV PYTHONPATH="/app/api"
 
 WORKDIR /app/api
 
