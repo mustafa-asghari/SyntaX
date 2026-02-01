@@ -27,9 +27,9 @@ from endpoints.search import search_tweets
 from endpoints.social import get_followers, get_following
 from account_pool import get_account_pool
 
-from src.cache import CacheManager
-from src.cache.redis_cache import make_key
-from src.cache.config import CacheConfig
+from .cache import CacheManager
+from .cache.redis_cache import make_key
+from .cache.config import CacheConfig
 
 
 # Response models
