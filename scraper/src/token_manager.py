@@ -81,7 +81,10 @@ class TokenManager:
                 self._proxy_manager.report_result(proxy_cfg, success=token_set is not None)
             return token_set
 
-        max_workers = min(needed, 5)
+        # Scale workers to proxy count or env override (default 5)
+        env_workers = int(os.environ.get("TOKEN_GEN_WORKERS", "0"))
+        proxy_count = self._proxy_manager.count if self._proxy_manager.has_proxies else 1
+        max_workers = min(needed, env_workers or max(5, proxy_count))
         with ThreadPoolExecutor(max_workers=max_workers,
                                 thread_name_prefix="tokgen") as executor:
             futures = {executor.submit(_create_one, i): i

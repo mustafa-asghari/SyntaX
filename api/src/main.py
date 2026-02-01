@@ -155,21 +155,18 @@ cache_mgr: Optional[CacheManager] = None
 def _get_client():
     """Get an XClient with a token from the pool or on-demand.
 
-    Returns (client, token_set, session) where *session* is a warm
-    curl-cffi session borrowed from the SessionPool.  The caller MUST
-    release it back via ``session_pool.release(session)`` when done.
+    Returns (client, token_set, session, proxy).  The caller MUST
+    release the session back via ``session_pool.release(session, proxy=proxy)``.
 
-    Proxy affinity: if the token was minted via a specific proxy, that
-    same proxy is reused so libcurl's per-handle connection cache
-    (DNS/TCP/TLS) stays warm.
+    Kept synchronous — pool.get_token() is a single Redis ZPOPMAX (~0.1ms
+    local) so thread-dispatch overhead would cost more than it saves.
+    The only heavy path (create_token_set) is guarded behind pool-empty.
     """
     token_set = pool.get_token() if pool else None
 
     if token_set and token_set.proxy:
-        # Honour the proxy the token was minted with
         proxy = token_set.proxy
     else:
-        # No token yet, or token has no proxy — pick one now
         proxy = None
         if _proxy_manager and _proxy_manager.has_proxies:
             proxy_cfg = _proxy_manager.get_proxy()
@@ -177,11 +174,12 @@ def _get_client():
                 proxy = proxy_cfg.to_curl_cffi_format()
 
     if not token_set:
+        # Fallback: no pre-warmed token available — create inline.
+        # This is rare when TokenManager is running.
         token_set = create_token_set(proxy=proxy)
         if not token_set:
             raise HTTPException(status_code=503, detail="Unable to create authentication token")
 
-    # Borrow a TLS-warm session from the pool, keyed by proxy
     session = session_pool.acquire(proxy=proxy) if session_pool else None
     client = XClient(token_set=token_set, proxy=proxy, token_pool_ref=pool,
                      session=session)

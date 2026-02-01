@@ -1,0 +1,26 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+env
+.env.local
+
+# Node (dashboard)
+dashboard-next/node_modules
+dashboard-next/.next
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Docs / misc
+*.md
+bench_*.py
+SCRAPER_SPEED_MAX.md

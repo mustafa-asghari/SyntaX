@@ -191,15 +191,17 @@ class TokenPool:
 
         # Get token data
         data = self.redis_client.hgetall(self._token_key(token_id))
-        if not data:
-            return None
+        if not data or "guest_token" not in data or "csrf_token" not in data:
+            # Stale or malformed hash — discard and try next
+            self.redis_client.delete(self._token_key(token_id))
+            return self.get_token()
 
         proxy_url = data.get("proxy_url") or None
         proxy = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         token_set = TokenSet(
             guest_token=data["guest_token"],
             csrf_token=data["csrf_token"],
-            created_at=float(data["created_at"]),
+            created_at=float(data.get("created_at", "0")),
             cf_cookie=data.get("cf_cookie") or None,
             request_count=int(data.get("request_count", 0)),
             proxy=proxy,
