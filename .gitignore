@@ -23,3 +23,4 @@ MISSING_FEATURES.md
 .claude/config.json
 accounts.json
 .claude/skills.json
+bench_results
