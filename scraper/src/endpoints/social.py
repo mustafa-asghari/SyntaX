@@ -88,6 +88,7 @@ def _social_request(
     use_client = client
     account = None
     pool = None
+    session = None
 
     if not (client.token_set and client.token_set.is_authenticated):
         pool = get_account_pool()
@@ -96,7 +97,9 @@ def _social_request(
             raise ValueError(f"{operation} requires an authenticated account. "
                              f"Add accounts to accounts.json.")
         auth_ts = token_set_from_account(account)
-        use_client = XClient(token_set=auth_ts, proxy=account.proxy_dict)
+        session = account.acquire_session()
+        use_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
+                             session=session)
 
     try:
         data, elapsed_ms = use_client.graphql_request(
@@ -116,7 +119,9 @@ def _social_request(
         raise
     finally:
         if account and use_client is not client:
-            use_client.close()
+            use_client.close()  # no-op for external session
+        if account and session:
+            account.release_session(session)
 
     # Parse the response
     users, next_cursor = _parse_social_response(data)

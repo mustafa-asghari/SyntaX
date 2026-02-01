@@ -6,6 +6,7 @@ Background service that continuously generates and maintains the token pool.
 import time
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from client import create_token_set
 from token_pool import TokenPool, get_pool
@@ -60,29 +61,41 @@ class TokenManager:
                 time.sleep(1)
 
     def _fill_pool(self):
-        """Fill pool to target size."""
+        """Fill pool to target size using parallel token generation."""
         current = self.pool.pool_size()
         target = TOKEN_CONFIG["pool_target_size"]
 
         if current >= target:
             return
 
-        print(f"Filling pool: {current}/{target}")
+        needed = target - current
+        print(f"Filling pool: {current}/{target} (generating {needed} in parallel)")
 
-        while self.pool.pool_size() < target and self.running:
+        # Each worker gets its own proxy for IP diversity
+        def _create_one(_idx: int):
             proxy_cfg = self._proxy_manager.get_proxy()
             proxy = proxy_cfg.to_curl_cffi_format() if proxy_cfg else None
             token_set = create_token_set(proxy=proxy)
             if proxy_cfg:
                 self._proxy_manager.report_result(proxy_cfg, success=token_set is not None)
-            if token_set:
-                self.pool.add_token(token_set)
-                self.stats["tokens_created"] += 1
-                print(f"  Created token ({self.pool.pool_size()}/{target})")
-            else:
-                self.stats["tokens_failed"] += 1
-                print(f"  Failed to create token")
-                time.sleep(1)  # Back off on failure
+            return token_set
+
+        max_workers = min(needed, 5)
+        with ThreadPoolExecutor(max_workers=max_workers,
+                                thread_name_prefix="tokgen") as executor:
+            futures = {executor.submit(_create_one, i): i
+                       for i in range(needed) if self.running}
+            for future in as_completed(futures):
+                if not self.running:
+                    break
+                token_set = future.result()
+                if token_set:
+                    self.pool.add_token(token_set)
+                    self.stats["tokens_created"] += 1
+                    print(f"  Created token ({self.pool.pool_size()}/{target})")
+                else:
+                    self.stats["tokens_failed"] += 1
+                    print(f"  Failed to create token")
 
     def _maintenance_cycle(self):
         """Run one maintenance cycle."""

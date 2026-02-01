@@ -74,11 +74,13 @@ def search_tweets(
         # No accounts available — return empty
         return [], None, 0.0
 
-    # Build an auth client using the account's credentials + proxy
+    # Build an auth client using the account's credentials + warm session
     auth_ts = token_set_from_account(account)
+    session = account.acquire_session()
     auth_client = XClient(
         token_set=auth_ts,
         proxy=account.proxy_dict,
+        session=session,
     )
 
     try:
@@ -101,7 +103,8 @@ def search_tweets(
         pool.release(account, success=False, status_code=status)
         return [], None, 0.0
     finally:
-        auth_client.close()
+        auth_client.close()  # no-op for external session
+        account.release_session(session)
 
 
 def _parse_search_response(data: Dict[str, Any]) -> tuple[List[Tweet], Optional[str]]:

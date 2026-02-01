@@ -249,7 +249,7 @@ class XClient:
     - Proxy support for distributed scraping
     """
     __slots__ = ('token_set', '_browser', '_session', '_headers_cache', '_proxy',
-                 '_token_pool_ref')
+                 '_token_pool_ref', '_external_session')
 
     def __init__(
         self,
@@ -257,6 +257,7 @@ class XClient:
         browser: str = "chrome131",
         proxy: Optional[Dict[str, str]] = None,
         token_pool_ref=None,
+        session: Optional[requests.Session] = None,
     ):
         """
         Initialize XClient.
@@ -267,10 +268,13 @@ class XClient:
             proxy: Proxy dict {"http": "url", "https": "url"} for all requests
             token_pool_ref: Optional token pool — when set, auto-rotates to a
                 fresh token when the current one expires or hits request limit
+            session: Optional pre-warmed curl-cffi session. If provided, the
+                caller owns the lifecycle — close() becomes a no-op for it.
         """
         self.token_set = token_set
         self._browser = browser
-        self._session = None
+        self._session = session
+        self._external_session = session is not None
         self._headers_cache: Optional[Dict[str, str]] = None
         self._proxy = proxy
         self._token_pool_ref = token_pool_ref
@@ -519,10 +523,10 @@ class XClient:
         return results
 
     def close(self):
-        """Close the session."""
-        if self._session:
+        """Close the session. No-op if session was externally provided."""
+        if self._session and not self._external_session:
             self._session.close()
-            self._session = None
+        self._session = None
 
 
 # ── Token Creation ──────────────────────────────────────────

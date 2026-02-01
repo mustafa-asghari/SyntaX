@@ -64,9 +64,10 @@ class CacheManager:
             (data, cache_layer) where cache_layer is "redis", "live", or "swr"
         """
         if fresh:
-            data = await self.coalescer.do(cache_key, fetch_fn)
-            await self.redis.set(cache_key, data, ttl)
-            return data, "live"
+            (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
+            # Fire-and-forget: write cache in background, return immediately
+            asyncio.create_task(self.redis.set(cache_key, data, ttl))
+            return data, "coalesced" if coalesced else "live"
 
         # Try Redis L1
         envelope = await self.redis.get(cache_key)
@@ -79,9 +80,11 @@ class CacheManager:
             return envelope["data"], "swr"
 
         # Cache miss — coalesce concurrent requests
-        data = await self.coalescer.do(cache_key, fetch_fn)
-        await self.redis.set(cache_key, data, ttl)
-        return data, "live"
+        (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
+        if not coalesced:
+            # Fire-and-forget: write cache in background, return immediately
+            asyncio.create_task(self.redis.set(cache_key, data, ttl))
+        return data, "coalesced" if coalesced else "live"
 
     async def _swr_refresh(
         self,
@@ -117,10 +120,11 @@ class CacheManager:
         start = time.time()
 
         if fresh:
-            tweet_dicts, next_cursor = await self.coalescer.do(cache_key, fetch_fn)
-            await self._write_through_search(cache_key, tweet_dicts, next_cursor)
-            self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
-            return tweet_dicts, next_cursor, "live"
+            (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+            if not coalesced:
+                asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+            self._log_search_query(query, product, len(tweet_dicts), coalesced, time.time() - start)
+            return tweet_dicts, next_cursor, "coalesced" if coalesced else "live"
 
         # L1: Redis full response
         envelope = await self.redis.get(cache_key)
@@ -152,10 +156,12 @@ class CacheManager:
                     return hydrated, None, "typesense"
 
         # L3: Live fetch
-        tweet_dicts, next_cursor = await self.coalescer.do(cache_key, fetch_fn)
-        await self._write_through_search(cache_key, tweet_dicts, next_cursor)
-        self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
-        return tweet_dicts, next_cursor, "live"
+        (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+        if not coalesced:
+            # Fire-and-forget: write all cache layers in background
+            asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+        self._log_search_query(query, product, len(tweet_dicts), coalesced, time.time() - start)
+        return tweet_dicts, next_cursor, "coalesced" if coalesced else "live"
 
     async def _hydrate_tweets(self, tweet_ids: list[str]) -> list[dict]:
         """Hydrate tweet IDs from Redis individual tweet cache."""

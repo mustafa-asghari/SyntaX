@@ -11,11 +11,19 @@ Each account is pinned to a proxy IP so X can't correlate them.
 import json
 import time
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from curl_cffi import requests as curl_requests
+
 from config import TOKEN_CONFIG
+
+# TLS pre-warm target
+_PREWARM_URL = "https://api.x.com/"
+_PREWARM_TIMEOUT = (5, 2)
+_MAX_SESSIONS_PER_ACCOUNT = 4
 
 
 @dataclass
@@ -30,6 +38,10 @@ class Account:
     rate_limited_until: float = 0.0  # timestamp when 429 cooldown expires
     failures: int = 0
 
+    def __post_init__(self):
+        self._sessions: deque = deque()
+        self._session_lock = threading.Lock()
+
     @property
     def is_available(self) -> bool:
         """Check if account is usable (not rate-limited)."""
@@ -43,6 +55,37 @@ class Account:
         if not self.proxy:
             return None
         return {"http": self.proxy, "https": self.proxy}
+
+    def _create_warm_session(self) -> curl_requests.Session:
+        """Create a new session and pre-warm TLS to api.x.com."""
+        session = curl_requests.Session(impersonate="chrome131")
+        if self.proxy:
+            session.proxies = self.proxy_dict
+        try:
+            session.head(_PREWARM_URL, headers={"User-Agent": "Mozilla/5.0"},
+                         timeout=_PREWARM_TIMEOUT)
+            session.cookies.clear()
+        except Exception:
+            pass  # best-effort
+        return session
+
+    def acquire_session(self) -> curl_requests.Session:
+        """Pop a warm session from the pool, or create a new one."""
+        with self._session_lock:
+            if self._sessions:
+                session = self._sessions.popleft()
+                session.cookies.clear()
+                return session
+        return self._create_warm_session()
+
+    def release_session(self, session: curl_requests.Session) -> None:
+        """Return a session to the pool (or close it if pool is full)."""
+        session.cookies.clear()
+        with self._session_lock:
+            if len(self._sessions) < _MAX_SESSIONS_PER_ACCOUNT:
+                self._sessions.append(session)
+                return
+        session.close()
 
 
 class AccountPool:
@@ -118,6 +161,16 @@ class AccountPool:
                 return cls.from_file(str(default))
 
         return cls()
+
+    def prewarm_all(self, sessions_per_account: int = 2) -> None:
+        """Pre-warm TLS sessions for all accounts (call on startup)."""
+        for account in self._accounts:
+            for _ in range(sessions_per_account):
+                session = account._create_warm_session()
+                account.release_session(session)
+        if self._accounts:
+            print(f"[AccountPool] Pre-warmed {sessions_per_account} sessions "
+                  f"for {len(self._accounts)} accounts")
 
     @property
     def has_accounts(self) -> bool:

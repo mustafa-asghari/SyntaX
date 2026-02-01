@@ -214,6 +214,7 @@ def get_tweet_detail(
     use_client = client
     account = None
     pool = None
+    session = None
 
     if client.token_set and not client.token_set.is_authenticated:
         # Guest token — grab an auth account from the pool
@@ -222,7 +223,9 @@ def get_tweet_detail(
 
         if account:
             auth_ts = token_set_from_account(account)
-            use_client = XClient(token_set=auth_ts, proxy=account.proxy_dict)
+            session = account.acquire_session()
+            use_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
+                                 session=session)
         else:
             # No accounts — fall back to single tweet (no replies)
             main_tweet, elapsed_ms = get_tweet_by_id(tweet_id, client, debug=debug)
@@ -248,7 +251,9 @@ def get_tweet_detail(
         return main_tweet, [], elapsed_ms
     finally:
         if account and use_client is not client:
-            use_client.close()
+            use_client.close()  # no-op for external session
+        if account and session:
+            account.release_session(session)
 
     # Parse conversation thread
     main_tweet = None

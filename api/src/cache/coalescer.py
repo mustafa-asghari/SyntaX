@@ -14,18 +14,24 @@ class Coalescer:
     def __init__(self):
         self._in_flight: dict[str, asyncio.Task] = {}
 
-    async def do(self, key: str, fn: Callable[[], Awaitable[Any]]) -> Any:
+    async def do(self, key: str, fn: Callable[[], Awaitable[Any]]) -> tuple[Any, bool]:
         """
         If `key` is already in-flight, await the existing task.
         Otherwise, create a new task for `fn()` and share it.
+
+        Returns:
+            (result, was_coalesced) — was_coalesced=True for waiters,
+            False for the originator.
         """
         if key in self._in_flight:
-            return await self._in_flight[key]
+            result = await self._in_flight[key]
+            return result, True
 
         task = asyncio.create_task(self._run(key, fn))
         self._in_flight[key] = task
         try:
-            return await task
+            result = await task
+            return result, False
         finally:
             self._in_flight.pop(key, None)
 
@@ -33,7 +39,6 @@ class Coalescer:
         try:
             return await fn()
         except Exception:
-            # Remove from in-flight so retries can proceed
             self._in_flight.pop(key, None)
             raise
 

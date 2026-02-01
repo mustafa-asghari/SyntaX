@@ -1,8 +1,10 @@
 -- SyntaX ClickHouse Schema
 -- Optimized for high-volume writes and fast analytics
 
+CREATE DATABASE IF NOT EXISTS syntax;
+
 -- Users table (scraped X profiles)
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS syntax.users (
     user_id String,
     username String,
     display_name String,
@@ -24,7 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
 ORDER BY user_id;
 
 -- Tweets table (scraped tweets)
-CREATE TABLE IF NOT EXISTS tweets (
+CREATE TABLE IF NOT EXISTS syntax.tweets (
     tweet_id String,
     author_id String,
     author_username String,
@@ -49,7 +51,7 @@ ORDER BY (created_at, tweet_id)
 PARTITION BY toYYYYMM(created_at);
 
 -- Usage events (API calls for billing)
-CREATE TABLE IF NOT EXISTS usage_events (
+CREATE TABLE IF NOT EXISTS syntax.usage_events (
     event_id UUID DEFAULT generateUUIDv4(),
     api_key_id String,
     endpoint String,
@@ -65,7 +67,7 @@ PARTITION BY toYYYYMMDD(created_at)
 TTL created_at + INTERVAL 90 DAY;
 
 -- Query IDs cache (for monitoring changes)
-CREATE TABLE IF NOT EXISTS query_ids (
+CREATE TABLE IF NOT EXISTS syntax.query_ids (
     operation_name String,
     query_id String,
     discovered_at DateTime64(3) DEFAULT now64(3),
@@ -74,7 +76,7 @@ CREATE TABLE IF NOT EXISTS query_ids (
 ORDER BY operation_name;
 
 -- Search query analytics (cache performance tracking)
-CREATE TABLE IF NOT EXISTS search_queries (
+CREATE TABLE IF NOT EXISTS syntax.search_queries (
     query String,
     product String,
     result_count UInt16,
@@ -87,7 +89,7 @@ PARTITION BY toYYYYMMDD(created_at)
 TTL created_at + INTERVAL 90 DAY;
 
 -- Token health metrics
-CREATE TABLE IF NOT EXISTS token_metrics (
+CREATE TABLE IF NOT EXISTS syntax.token_metrics (
     token_id String,
     token_type String,  -- 'guest' or 'cf_cookie'
     requests_made UInt32,
