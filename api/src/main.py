@@ -27,12 +27,9 @@ from endpoints.search import search_tweets
 from endpoints.social import get_followers, get_following
 from account_pool import get_account_pool
 
-# Add api/src to path for cache package imports
-sys.path.insert(0, os.path.dirname(__file__))
-
-from cache import CacheManager
-from cache.redis_cache import make_key
-from cache.config import CacheConfig
+from src.cache import CacheManager
+from src.cache.redis_cache import make_key
+from src.cache.config import CacheConfig
 
 
 # Response models
