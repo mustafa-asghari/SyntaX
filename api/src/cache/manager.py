@@ -121,6 +121,12 @@ class CacheManager:
                 got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
                 if got_lock:
                     try:
+                        # Double-check: another holder may have just populated cache
+                        envelope = await self.redis.get(cache_key)
+                        if envelope is not None:
+                            age = time.time() - envelope.get("stored_at", 0)
+                            if age < 2:  # freshly written by previous holder
+                                return envelope["data"], "coalesced"
                         data = await fetch_fn()
                         await self.redis.set(cache_key, data, ttl)
                         return data, "live"
@@ -157,6 +163,10 @@ class CacheManager:
             got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
             if got_lock:
                 try:
+                    # Double-check: cache may have been populated while we waited
+                    envelope = await self.redis.get(cache_key)
+                    if envelope is not None:
+                        return envelope["data"], "coalesced"
                     data = await fetch_fn()
                     await self.redis.set(cache_key, data, ttl)
                     return data, "live"
@@ -217,6 +227,14 @@ class CacheManager:
                 got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
                 if got_lock:
                     try:
+                        # Double-check: another holder may have just populated cache
+                        envelope = await self.redis.get(cache_key)
+                        if envelope is not None:
+                            age = time.time() - envelope.get("stored_at", 0)
+                            if age < 2:
+                                cached = envelope["data"]
+                                self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
+                                return cached["tweets"], cached.get("next_cursor"), "coalesced"
                         tweet_dicts, next_cursor = await fetch_fn()
                         await self._write_through_search(cache_key, tweet_dicts, next_cursor)
                         self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
@@ -274,6 +292,12 @@ class CacheManager:
             got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
             if got_lock:
                 try:
+                    # Double-check: cache may have been populated while we waited
+                    envelope = await self.redis.get(cache_key)
+                    if envelope is not None:
+                        cached = envelope["data"]
+                        self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
+                        return cached["tweets"], cached.get("next_cursor"), "coalesced"
                     tweet_dicts, next_cursor = await fetch_fn()
                     await self._write_through_search(cache_key, tweet_dicts, next_cursor)
                     self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
