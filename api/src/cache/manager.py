@@ -48,6 +48,57 @@ class CacheManager:
         await self.typesense.close()
         await self.clickhouse.close()
 
+    async def probe(self) -> dict:
+        """Active health checks for cache backends."""
+        results = {}
+
+        # Redis
+        r_start = time.perf_counter()
+        try:
+            ok = await self.redis.ping()
+            results["redis"] = {
+                "ok": bool(ok),
+                "latency_ms": round((time.perf_counter() - r_start) * 1000, 1),
+            }
+        except Exception as e:
+            results["redis"] = {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - r_start) * 1000, 1),
+                "error": str(e),
+            }
+
+        # Typesense
+        t_start = time.perf_counter()
+        try:
+            ok = await self.typesense.health()
+            results["typesense"] = {
+                "ok": bool(ok),
+                "latency_ms": round((time.perf_counter() - t_start) * 1000, 1),
+            }
+        except Exception as e:
+            results["typesense"] = {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - t_start) * 1000, 1),
+                "error": str(e),
+            }
+
+        # ClickHouse
+        c_start = time.perf_counter()
+        try:
+            ok = await self.clickhouse.health()
+            results["clickhouse"] = {
+                "ok": bool(ok),
+                "latency_ms": round((time.perf_counter() - c_start) * 1000, 1),
+            }
+        except Exception as e:
+            results["clickhouse"] = {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - c_start) * 1000, 1),
+                "error": str(e),
+            }
+
+        return results
+
     # ── Generic cache-aside ──────────────────────────────────
 
     async def get_or_fetch(

@@ -24,15 +24,23 @@ class ClickHouseWriter:
 
     async def connect(self) -> None:
         try:
-            self._client = clickhouse_connect.get_client(
-                host=CacheConfig.CLICKHOUSE_HOST,
-                port=int(CacheConfig.CLICKHOUSE_PORT),
-                username=CacheConfig.CLICKHOUSE_USER,
-                password=CacheConfig.CLICKHOUSE_PASSWORD,
-                database=CacheConfig.CLICKHOUSE_DB,
+            def _init_client():
+                client = clickhouse_connect.get_client(
+                    host=CacheConfig.CLICKHOUSE_HOST,
+                    port=int(CacheConfig.CLICKHOUSE_PORT),
+                    username=CacheConfig.CLICKHOUSE_USER,
+                    password=CacheConfig.CLICKHOUSE_PASSWORD,
+                    database=CacheConfig.CLICKHOUSE_DB,
+                    connect_timeout=CacheConfig.CONNECT_TIMEOUT,
+                    send_receive_timeout=CacheConfig.CONNECT_TIMEOUT,
+                )
+                client.query("SELECT 1")
+                return client
+
+            self._client = await asyncio.wait_for(
+                asyncio.to_thread(_init_client),
+                timeout=CacheConfig.CONNECT_TIMEOUT,
             )
-            # Verify
-            self._client.query("SELECT 1")
             self._available = True
             self._flush_task = asyncio.create_task(self._flush_loop())
             print("[cache] ClickHouse writer connected")
@@ -58,6 +66,13 @@ class ClickHouseWriter:
     @property
     def available(self) -> bool:
         return self._available
+
+    async def health(self) -> bool:
+        """Check ClickHouse connectivity with a lightweight query."""
+        if not self._client:
+            return False
+        await asyncio.to_thread(self._client.query, "SELECT 1")
+        return True
 
     def buffer_tweets(self, tweet_dicts: list[dict]) -> None:
         """Add tweet dicts to the write buffer."""

@@ -274,6 +274,17 @@ async def health():
     }
 
 
+@app.get("/debug/health")
+async def debug_health():
+    """Active backend checks for production debugging."""
+    results = await cache_mgr.probe() if cache_mgr else {}
+    return {
+        "status": "ok",
+        "pool_size": pool.pool_size() if pool else 0,
+        "backends": results,
+    }
+
+
 # ── User Endpoints ──────────────────────────────────────────
 
 

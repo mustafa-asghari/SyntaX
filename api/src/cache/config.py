@@ -2,6 +2,9 @@ import os
 
 
 class CacheConfig:
+    # Startup/connect timeouts (seconds)
+    CONNECT_TIMEOUT: float = float(os.getenv("CACHE_CONNECT_TIMEOUT", "3"))
+
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 

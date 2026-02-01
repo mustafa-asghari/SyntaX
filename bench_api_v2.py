@@ -7,18 +7,19 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor
 
 LOCAL_BASE = "http://localhost:8000/v1"
+RAILWAY_BASE = "https://syntax-production-ae67.up.railway.app/v1"
 COMP_BASE = "https://api.twitterapi.io/twitter"
-COMP_KEY = "new1_769e26ea18f243a2a0b8ba80fc483e01"
+COMP_KEY = "new1_5e0eae591a60484585902c51373c585b"
 COMP_HEADERS = {"X-API-Key": COMP_KEY}
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-def test_local_search_flow():
+def test_search_flow(base_url, label):
     query = f"benchmark_{int(time.time())}" # Unique query to ensure cold start
-    url = f"{LOCAL_BASE}/search?q={query}"
+    url = f"{base_url}/search?q={query}"
     
-    log(f"--- Testing Local API (Query: {query}) ---")
+    log(f"--- Testing {label} API (Query: {query}) ---")
     
     # 1. Cold Fetch
     start = time.perf_counter()
@@ -53,10 +54,10 @@ def test_local_search_flow():
     except:
         log(f"3. Force Fresh Failed")
 
-def test_local_coalescing():
-    log("\n--- Testing Local Request Coalescing (10 concurrent) ---")
+def test_coalescing(base_url, label):
+    log(f"\n--- Testing {label} Request Coalescing (10 concurrent) ---")
     query = f"coalesce_{int(time.time())}"
-    url = f"{LOCAL_BASE}/search?q={query}"
+    url = f"{base_url}/search?q={query}"
     
     def fetch():
         start = time.perf_counter()
@@ -107,8 +108,10 @@ def test_competitor():
 
 if __name__ == "__main__":
     try:
-        test_local_search_flow()
-        test_local_coalescing()
+        test_search_flow(LOCAL_BASE, "Local")
+        test_coalescing(LOCAL_BASE, "Local")
+        test_search_flow(RAILWAY_BASE, "Railway")
+        test_coalescing(RAILWAY_BASE, "Railway")
         test_competitor()
     except Exception as e:
         log(f"Error: {e}")

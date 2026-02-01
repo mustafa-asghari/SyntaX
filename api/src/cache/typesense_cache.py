@@ -76,7 +76,7 @@ class TypesenseCache:
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"X-TYPESENSE-API-KEY": self._api_key},
-            timeout=5.0,
+            timeout=CacheConfig.CONNECT_TIMEOUT,
         )
         try:
             resp = await self._client.get("/health")
@@ -96,6 +96,13 @@ class TypesenseCache:
     @property
     def available(self) -> bool:
         return self._available
+
+    async def health(self) -> bool:
+        """Check Typesense health endpoint."""
+        if not self._client:
+            return False
+        resp = await self._client.get("/health")
+        return resp.status_code == 200
 
     async def _ensure_collection(self) -> None:
         """Create the tweets collection if it doesn't exist."""

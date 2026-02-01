@@ -32,6 +32,8 @@ class RedisCache:
         self._redis = aioredis.from_url(
             self._url,
             decode_responses=False,  # we handle bytes via orjson
+            socket_connect_timeout=CacheConfig.CONNECT_TIMEOUT,
+            socket_timeout=CacheConfig.CONNECT_TIMEOUT,
         )
         # Verify connectivity
         await self._redis.ping()
@@ -44,6 +46,13 @@ class RedisCache:
     @property
     def connected(self) -> bool:
         return self._redis is not None
+
+    async def ping(self) -> bool:
+        """Ping Redis to verify connectivity."""
+        if not self._redis:
+            return False
+        await self._redis.ping()
+        return True
 
     async def get(self, key: str) -> Optional[dict]:
         """Get a cached envelope. Returns {"data": ..., "stored_at": ...} or None."""
