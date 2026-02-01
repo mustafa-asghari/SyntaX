@@ -73,6 +73,10 @@ class TypesenseCache:
         self._available = False
 
     async def connect(self) -> None:
+        if not CacheConfig.TYPESENSE_ENABLED or not CacheConfig.TYPESENSE_HOST:
+            self._available = False
+            print("[cache] Typesense disabled")
+            return
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"X-TYPESENSE-API-KEY": self._api_key},

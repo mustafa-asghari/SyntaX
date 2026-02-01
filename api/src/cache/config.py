@@ -1,8 +1,20 @@
 import os
+from urllib.parse import urlparse
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _apply_typesense_url(host: str, port: int, protocol: str) -> tuple[str, int, str]:
+    raw = os.getenv("TYPESENSE_URL", "").strip()
+    if not raw:
+        return host, port, protocol
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    new_host = parsed.hostname or host
+    new_port = parsed.port or port
+    new_protocol = parsed.scheme or protocol
+    return new_host, new_port, new_protocol
 
 
 class CacheConfig:
@@ -17,6 +29,11 @@ class CacheConfig:
     TYPESENSE_PORT: int = int(os.getenv("TYPESENSE_PORT", "8108"))
     TYPESENSE_PROTOCOL: str = os.getenv("TYPESENSE_PROTOCOL", "http")
     TYPESENSE_API_KEY: str = os.getenv("TYPESENSE_API_KEY", "syntax-typesense-key")
+    TYPESENSE_ENABLED: bool = _env_bool("TYPESENSE_ENABLED", "true")
+
+    TYPESENSE_HOST, TYPESENSE_PORT, TYPESENSE_PROTOCOL = _apply_typesense_url(
+        TYPESENSE_HOST, TYPESENSE_PORT, TYPESENSE_PROTOCOL
+    )
 
     # ClickHouse
     CLICKHOUSE_HOST: str = os.getenv("CLICKHOUSE_HOST", "localhost")
