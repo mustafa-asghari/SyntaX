@@ -47,8 +47,8 @@ from debug import RequestDebug, SpeedDebugger
 
 # ── Constants ───────────────────────────────────────────────
 # Aggressive but safe timeouts (X API typically responds in <500ms)
-_CONNECT_TIMEOUT = 5
-_READ_TIMEOUT = 8
+_CONNECT_TIMEOUT = 3
+_READ_TIMEOUT = 6
 _DEFAULT_TIMEOUT = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 
 # Thread pool for parallel requests (reused across all clients)

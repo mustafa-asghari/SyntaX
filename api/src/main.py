@@ -65,7 +65,7 @@ class SessionPool:
     """
 
     _PREWARM_URL = "https://api.x.com/"
-    _PREWARM_TIMEOUT = (5, 2)
+    _PREWARM_TIMEOUT = (3, 2)
 
     def __init__(self, max_per_proxy: int = 0):
         # max_per_proxy=0 means "read from env at first use"
@@ -531,7 +531,7 @@ async def get_tweets_by_user(
 # ── Search Endpoints ────────────────────────────────────────
 
 
-@app.get("/v1/search", response_model=APIResponse)
+@app.get("/v1/search")
 async def search(
     q: str = Query(..., description="Search query"),
     count: int = Query(default=20, le=40),
@@ -544,7 +544,6 @@ async def search(
 
     async def _fetch():
         # Search is auth-gated — skip guest token, go straight to account pool.
-        # search_tweets() handles account acquisition internally.
         acct_pool = get_account_pool()
         account = acct_pool.acquire() if acct_pool.has_accounts else None
 
@@ -597,17 +596,19 @@ async def search(
     )
     total_time = (time.perf_counter() - start_time) * 1000
 
-    return APIResponse(
-        success=True,
-        data=tweet_dicts,
-        meta={
+    # Return ORJSONResponse directly — skip Pydantic validation overhead
+    return ORJSONResponse({
+        "success": True,
+        "data": tweet_dicts,
+        "error": None,
+        "meta": {
             "response_time_ms": round(total_time, 1),
             "count": len(tweet_dicts),
             "next_cursor": next_cursor,
             "cache_hit": cache_layer != "live",
             "cache_layer": cache_layer,
         },
-    )
+    })
 
 
 # ── Social Endpoints ────────────────────────────────────────
