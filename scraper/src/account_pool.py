@@ -23,7 +23,8 @@ from config import TOKEN_CONFIG
 # TLS pre-warm target
 _PREWARM_URL = "https://api.x.com/"
 _PREWARM_TIMEOUT = (5, 2)
-_MAX_SESSIONS_PER_ACCOUNT = 4
+import os as _os
+_MAX_SESSIONS_PER_ACCOUNT = int(_os.environ.get("MAX_SESSIONS_PER_ACCOUNT", "4"))
 
 
 @dataclass

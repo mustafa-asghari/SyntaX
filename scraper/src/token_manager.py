@@ -3,6 +3,7 @@ SyntaX Token Manager
 Background service that continuously generates and maintains the token pool.
 """
 
+import os
 import time
 import signal
 import sys
