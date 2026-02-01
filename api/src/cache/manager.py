@@ -115,6 +115,27 @@ class CacheManager:
             (data, cache_layer) where cache_layer is "redis", "live", or "swr"
         """
         if fresh:
+            # Prefer cross-process coalescing via Redis lock
+            if self.redis.connected:
+                lock_key = f"{cache_key}:lock"
+                got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
+                if got_lock:
+                    try:
+                        data = await fetch_fn()
+                        asyncio.create_task(self.redis.set(cache_key, data, ttl))
+                        return data, "live"
+                    finally:
+                        await self.redis.release_lock(lock_key)
+                # Wait for another instance to populate cache
+                envelope = await self.redis.wait_for_key(
+                    cache_key,
+                    CacheConfig.COALESCE_WAIT_TIMEOUT,
+                    CacheConfig.COALESCE_WAIT_INTERVAL,
+                )
+                if envelope is not None:
+                    return envelope["data"], "coalesced"
+
+            # Fallback: in-process coalescing only
             (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
             # Fire-and-forget: write cache in background, return immediately
             asyncio.create_task(self.redis.set(cache_key, data, ttl))
@@ -130,7 +151,27 @@ class CacheManager:
             asyncio.create_task(self._swr_refresh(cache_key, ttl, fetch_fn))
             return envelope["data"], "swr"
 
-        # Cache miss — coalesce concurrent requests
+        # Cache miss — coalesce concurrent requests across processes via Redis lock
+        if self.redis.connected:
+            lock_key = f"{cache_key}:lock"
+            got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
+            if got_lock:
+                try:
+                    data = await fetch_fn()
+                    asyncio.create_task(self.redis.set(cache_key, data, ttl))
+                    return data, "live"
+                finally:
+                    await self.redis.release_lock(lock_key)
+            # Wait for another instance to populate cache
+            envelope = await self.redis.wait_for_key(
+                cache_key,
+                CacheConfig.COALESCE_WAIT_TIMEOUT,
+                CacheConfig.COALESCE_WAIT_INTERVAL,
+            )
+            if envelope is not None:
+                return envelope["data"], "coalesced"
+
+        # Fallback: in-process coalescing only
         (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
         if not coalesced:
             # Fire-and-forget: write cache in background, return immediately
@@ -171,6 +212,27 @@ class CacheManager:
         start = time.time()
 
         if fresh:
+            if self.redis.connected:
+                lock_key = f"{cache_key}:lock"
+                got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
+                if got_lock:
+                    try:
+                        tweet_dicts, next_cursor = await fetch_fn()
+                        asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+                        self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
+                        return tweet_dicts, next_cursor, "live"
+                    finally:
+                        await self.redis.release_lock(lock_key)
+                envelope = await self.redis.wait_for_key(
+                    cache_key,
+                    CacheConfig.COALESCE_WAIT_TIMEOUT,
+                    CacheConfig.COALESCE_WAIT_INTERVAL,
+                )
+                if envelope is not None:
+                    cached = envelope["data"]
+                    self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
+                    return cached["tweets"], cached.get("next_cursor"), "coalesced"
+
             (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
             if not coalesced:
                 asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
@@ -206,7 +268,28 @@ class CacheManager:
                     self._log_search_query(query, product, len(hydrated), True, time.time() - start)
                     return hydrated, None, "typesense"
 
-        # L3: Live fetch
+        # L3: Live fetch with cross-process coalescing
+        if self.redis.connected:
+            lock_key = f"{cache_key}:lock"
+            got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
+            if got_lock:
+                try:
+                    tweet_dicts, next_cursor = await fetch_fn()
+                    asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+                    self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
+                    return tweet_dicts, next_cursor, "live"
+                finally:
+                    await self.redis.release_lock(lock_key)
+            envelope = await self.redis.wait_for_key(
+                cache_key,
+                CacheConfig.COALESCE_WAIT_TIMEOUT,
+                CacheConfig.COALESCE_WAIT_INTERVAL,
+            )
+            if envelope is not None:
+                cached = envelope["data"]
+                self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
+                return cached["tweets"], cached.get("next_cursor"), "coalesced"
+
         (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
         if not coalesced:
             # Fire-and-forget: write all cache layers in background

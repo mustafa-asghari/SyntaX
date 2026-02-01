@@ -6,6 +6,7 @@ All values stored as: {"data": <payload>, "stored_at": <unix_timestamp>}
 
 import hashlib
 import time
+import asyncio
 from typing import Any, Optional
 
 import orjson
@@ -104,3 +105,26 @@ class RedisCache:
     async def delete(self, key: str) -> None:
         if self._redis:
             await self._redis.delete(key)
+
+    async def try_lock(self, key: str, ttl: int) -> bool:
+        """Acquire a short-lived lock (NX)."""
+        if not self._redis:
+            return False
+        return bool(await self._redis.set(key, "1", nx=True, ex=ttl))
+
+    async def release_lock(self, key: str) -> None:
+        """Release a lock key."""
+        if self._redis:
+            await self._redis.delete(key)
+
+    async def wait_for_key(self, key: str, timeout: float, interval: float = 0.05) -> Optional[dict]:
+        """Poll for a key to appear, returning the envelope or None on timeout."""
+        if not self._redis:
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            envelope = await self.get(key)
+            if envelope is not None:
+                return envelope
+            await asyncio.sleep(interval)
+        return None
