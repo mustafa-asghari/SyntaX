@@ -1,6 +1,10 @@
 import os
 
 
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 class CacheConfig:
     # Startup/connect timeouts (seconds)
     CONNECT_TIMEOUT: float = float(os.getenv("CACHE_CONNECT_TIMEOUT", "3"))
@@ -20,6 +24,8 @@ class CacheConfig:
     CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "default")
     CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "")
     CLICKHOUSE_DB: str = os.getenv("CLICKHOUSE_DB", "syntax")
+    CLICKHOUSE_BOOTSTRAP: bool = _env_bool("CLICKHOUSE_BOOTSTRAP", "true")
+    CLICKHOUSE_INIT_SQL_PATH: str = os.getenv("CLICKHOUSE_INIT_SQL_PATH", "/app/scripts/init_db.sql")
 
     # TTLs (seconds)
     TTL_SEARCH: int = 60

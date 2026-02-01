@@ -7,6 +7,7 @@ Uses clickhouse-connect for async-compatible HTTP inserts.
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import clickhouse_connect
@@ -41,6 +42,7 @@ class ClickHouseWriter:
                 asyncio.to_thread(_init_client),
                 timeout=CacheConfig.CONNECT_TIMEOUT,
             )
+            await self._bootstrap_schema()
             self._available = True
             self._flush_task = asyncio.create_task(self._flush_loop())
             print("[cache] ClickHouse writer connected")
@@ -98,6 +100,35 @@ class ClickHouseWriter:
             "cache_hit": 1 if cache_hit else 0,
             "response_time_ms": response_time_ms,
         })
+
+    async def _bootstrap_schema(self) -> None:
+        """Run init SQL to ensure required tables exist."""
+        if not CacheConfig.CLICKHOUSE_BOOTSTRAP or not self._client:
+            return
+
+        sql_path = Path(CacheConfig.CLICKHOUSE_INIT_SQL_PATH)
+        if not sql_path.exists():
+            print(f"[cache] ClickHouse init SQL not found: {sql_path}")
+            return
+
+        def _run_sql():
+            raw = sql_path.read_text()
+            lines = []
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("--"):
+                    continue
+                lines.append(line)
+            cleaned = "\n".join(lines)
+            statements = [s.strip() for s in cleaned.split(";") if s.strip()]
+            for stmt in statements:
+                self._client.command(stmt)
+
+        try:
+            await asyncio.to_thread(_run_sql)
+            print(f"[cache] ClickHouse schema ensured via {sql_path}")
+        except Exception as e:
+            print(f"[cache] ClickHouse schema init error: {e}")
 
     async def _flush_loop(self) -> None:
         while True:
