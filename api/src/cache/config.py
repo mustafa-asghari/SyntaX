@@ -45,15 +45,15 @@ class CacheConfig:
     CLICKHOUSE_INIT_SQL_PATH: str = os.getenv("CLICKHOUSE_INIT_SQL_PATH", "/app/scripts/init_db.sql")
 
     # TTLs (seconds)
-    TTL_SEARCH: int = 60
-    TTL_TWEET: int = 1800       # 30 min
+    TTL_SEARCH: int = 300        # 5 min — keeps CF edge + Redis warm for popular queries
+    TTL_TWEET: int = 1800        # 30 min
     TTL_TWEET_DETAIL: int = 300  # 5 min
-    TTL_PROFILE: int = 60
-    TTL_USER_TWEETS: int = 120
-    TTL_SOCIAL: int = 120
+    TTL_PROFILE: int = 300       # 5 min
+    TTL_USER_TWEETS: int = 300   # 5 min
+    TTL_SOCIAL: int = 300        # 5 min
 
     # SWR threshold (seconds) — responses older than this trigger background refresh
-    SWR_THRESHOLD: int = 30
+    SWR_THRESHOLD: int = 120     # 2 min — serve stale for longer, refresh in background
 
     # ClickHouse flush interval (seconds)
     CH_FLUSH_INTERVAL: int = 5

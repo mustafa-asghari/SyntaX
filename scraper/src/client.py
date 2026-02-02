@@ -23,7 +23,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Dict, Any, Tuple, List, Callable
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 from functools import lru_cache
 
 import bs4
@@ -334,13 +333,11 @@ class XClient:
         except Exception:
             pass  # Swallow errors - pre-warming is best-effort
 
-    def _get_headers(self, url: str, method: str = "GET") -> Dict[str, str]:
+    def _get_headers(self, path: str = "", method: str = "GET") -> Dict[str, str]:
         """Build headers with transaction ID. Uses pre-built template."""
         if not self.token_set:
             raise ValueError("No token set configured")
 
-        # Extract path once (urlparse is relatively expensive)
-        path = urlparse(url).path
         txn_id = _txn_generator.generate(method=method, path=path)
 
         # Use dict literal copy for speed (faster than .copy())
@@ -441,7 +438,8 @@ class XClient:
 
         rd = debug_obj
 
-        url = f"{GRAPHQL_BASE_URL}/{query_id}/{operation_name}"
+        path = f"/graphql/{query_id}/{operation_name}"
+        url = f"https://api.x.com{path}"
 
         if rd:
             rd.phase("build params")
@@ -466,7 +464,7 @@ class XClient:
         if rd:
             rd.phase("build headers")
 
-        headers = self._get_headers(url)
+        headers = self._get_headers(path=path)
         cookies = self._get_cookies()
 
         if rd:

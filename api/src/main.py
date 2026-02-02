@@ -734,13 +734,13 @@ async def search(
     response.headers["X-Cache-Layer"] = cache_layer
     response.headers["X-Cache-Hit"] = "1" if cache_layer != "live" else "0"
 
-    # Cloudflare edge caching — huge latency win for repeated queries.
-    # fresh=true: no edge cache. Otherwise: let CF cache for 30s, serve stale for 60s.
+    # Cloudflare edge caching — keeps popular queries warm at edge.
+    # fresh=true: no edge cache. Otherwise: CF caches 5 min, serves stale for 5 more.
     if fresh:
         response.headers["Cache-Control"] = "no-store"
     elif tweet_dicts:
-        response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
-        response.headers["CDN-Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
+        response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=300"
+        response.headers["CDN-Cache-Control"] = "public, max-age=300, stale-while-revalidate=300"
     else:
         # Don't cache empty results at edge
         response.headers["Cache-Control"] = "no-store"
