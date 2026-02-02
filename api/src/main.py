@@ -868,6 +868,237 @@ async def pool_stats():
     return pool.pool_stats()
 
 
+# ── Super Debug Endpoint ───────────────────────────────────
+
+
+@app.get("/v1/debug/search-trace")
+async def debug_search_trace(
+    q: str = Query(default="bitcoin", description="Search query"),
+    count: int = Query(default=20, le=40),
+    product: str = Query(default="Top"),
+    runs: int = Query(default=3, le=10, description="Number of runs"),
+):
+    """
+    Deep timing trace of the search pipeline.
+    Times EVERY step: account acquire, session acquire, header build,
+    cookie build, token health check, TLS/DNS/TCP (via curl_cffi info),
+    upstream HTTP, JSON parse, tweet parse, transform, serialization.
+
+    Hit this endpoint and it tells you exactly where every ms goes.
+    """
+    import socket
+
+    results = []
+
+    for run_idx in range(runs):
+        trace = {"run": run_idx + 1, "steps": {}}
+        t = time.perf_counter
+
+        # 1. Account pool acquire
+        t0 = t()
+        acct_pool = get_account_pool()
+        account = acct_pool.acquire() if acct_pool.has_accounts else None
+        trace["steps"]["account_pool_acquire"] = round((t() - t0) * 1000, 3)
+
+        if not account:
+            trace["error"] = "No accounts available"
+            trace["steps"]["account_pool_stats"] = acct_pool.stats()
+            results.append(trace)
+            continue
+
+        trace["account_label"] = account.label
+        trace["account_requests"] = account.request_count
+        trace["account_has_proxy"] = bool(account.proxy)
+
+        # 2. Token set creation from account
+        t0 = t()
+        from client import token_set_from_account
+        auth_ts = token_set_from_account(account)
+        trace["steps"]["token_set_from_account"] = round((t() - t0) * 1000, 3)
+
+        # 3. Session acquire from pool
+        t0 = t()
+        session = account.acquire_session()
+        trace["steps"]["session_acquire"] = round((t() - t0) * 1000, 3)
+        trace["session_pool_size"] = len(account._sessions)
+
+        # 4. XClient creation
+        t0 = t()
+        auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
+                              session=session)
+        trace["steps"]["xclient_create"] = round((t() - t0) * 1000, 3)
+
+        try:
+            # 5. Inside graphql_request — manual decomposition
+            query_id = None
+            from config import QUERY_IDS, TWEET_FEATURES
+            query_id = QUERY_IDS.get("SearchTimeline")
+
+            variables = {
+                "rawQuery": q,
+                "count": count,
+                "querySource": "typed_query",
+                "product": product,
+            }
+
+            # 5a. Token health check
+            t0 = t()
+            auth_client._check_token_health()
+            trace["steps"]["token_health_check"] = round((t() - t0) * 1000, 3)
+
+            # 5b. Build URL + params
+            t0 = t()
+            path = f"/graphql/{query_id}/SearchTimeline"
+            url = f"https://api.x.com{path}"
+            params = {
+                "variables": orjson.dumps(variables).decode(),
+                "features": orjson.dumps(TWEET_FEATURES).decode(),
+            }
+            trace["steps"]["build_params"] = round((t() - t0) * 1000, 3)
+
+            # 5c. Build headers (includes txn ID generation)
+            t0 = t()
+            headers = auth_client._get_headers(path=path)
+            trace["steps"]["build_headers_and_txn_id"] = round((t() - t0) * 1000, 3)
+
+            # 5d. Build cookies
+            t0 = t()
+            cookies = auth_client._get_cookies()
+            trace["steps"]["build_cookies"] = round((t() - t0) * 1000, 3)
+
+            # 5e. THE HTTP CALL — this is where 95%+ of time goes
+            t0 = t()
+            response = await asyncio.to_thread(
+                session.get,
+                url,
+                params=params,
+                headers=headers,
+                cookies=cookies,
+                timeout=(2, 4),
+            )
+            http_elapsed = (t() - t0) * 1000
+            trace["steps"]["http_request_total"] = round(http_elapsed, 3)
+
+            # Extract curl_cffi connection info if available
+            try:
+                info = response.elapsed  # timedelta
+                trace["steps"]["http_elapsed_reported"] = round(info.total_seconds() * 1000, 3) if info else None
+            except Exception:
+                pass
+
+            trace["http_status"] = response.status_code
+            trace["http_response_bytes"] = len(response.content) if response.content else 0
+
+            # 5f. Cookie clear
+            t0 = t()
+            session.cookies.clear()
+            trace["steps"]["cookie_clear"] = round((t() - t0) * 1000, 3)
+
+            # 5g. JSON parse
+            t0 = t()
+            data = orjson.loads(response.content)
+            trace["steps"]["json_parse"] = round((t() - t0) * 1000, 3)
+
+            # 5h. Search response parse (extract tweets from GraphQL response)
+            t0 = t()
+            from endpoints.search import _parse_search_response
+            tweets, next_cursor = _parse_search_response(data)
+            trace["steps"]["parse_search_response"] = round((t() - t0) * 1000, 3)
+            trace["tweet_count"] = len(tweets)
+
+            # 5i. Transform tweets to dicts
+            t0 = t()
+            tweet_dicts = [tw.to_dict() for tw in tweets]
+            trace["steps"]["transform_to_dict"] = round((t() - t0) * 1000, 3)
+
+            # 5j. Serialization (simulate ORJSONResponse)
+            t0 = t()
+            payload = orjson.dumps({"data": tweet_dicts})
+            trace["steps"]["orjson_serialize"] = round((t() - t0) * 1000, 3)
+            trace["response_payload_bytes"] = len(payload)
+
+            acct_pool.release(account, success=True, status_code=200)
+
+        except Exception as e:
+            trace["error"] = str(e)[:300]
+            status = 429 if "429" in str(e) else 403 if "403" in str(e) else 500
+            acct_pool.release(account, success=False, status_code=status)
+        finally:
+            # 6. Session release
+            t0 = t()
+            account.release_session(session)
+            trace["steps"]["session_release"] = round((t() - t0) * 1000, 3)
+
+        # Compute totals
+        total = sum(v for v in trace["steps"].values() if isinstance(v, (int, float)))
+        trace["total_ms"] = round(total, 3)
+
+        # Breakdown: upstream vs overhead
+        http_ms = trace["steps"].get("http_request_total", 0)
+        overhead_ms = total - http_ms
+        trace["upstream_ms"] = round(http_ms, 3)
+        trace["overhead_ms"] = round(overhead_ms, 3)
+        trace["overhead_pct"] = round((overhead_ms / total * 100) if total > 0 else 0, 1)
+
+        results.append(trace)
+
+    # Summary across runs
+    summary = {}
+    valid = [r for r in results if "error" not in r]
+    if valid:
+        summary["runs"] = len(valid)
+        summary["avg_total_ms"] = round(sum(r["total_ms"] for r in valid) / len(valid), 1)
+        summary["avg_upstream_ms"] = round(sum(r["upstream_ms"] for r in valid) / len(valid), 1)
+        summary["avg_overhead_ms"] = round(sum(r["overhead_ms"] for r in valid) / len(valid), 1)
+
+        # Per-step averages
+        all_steps = {}
+        for r in valid:
+            for k, v in r["steps"].items():
+                if isinstance(v, (int, float)):
+                    all_steps.setdefault(k, []).append(v)
+        summary["avg_steps"] = {
+            k: round(sum(vals) / len(vals), 3)
+            for k, vals in sorted(all_steps.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+        }
+
+        # Identify the bottleneck
+        top_step = max(summary["avg_steps"].items(), key=lambda x: x[1])
+        summary["bottleneck"] = {
+            "step": top_step[0],
+            "avg_ms": top_step[1],
+            "pct_of_total": round(top_step[1] / summary["avg_total_ms"] * 100, 1),
+        }
+
+    # DNS check — is api.x.com resolving fast?
+    t0 = time.perf_counter()
+    try:
+        ips = socket.getaddrinfo("api.x.com", 443, socket.AF_INET)
+        dns_ms = (time.perf_counter() - t0) * 1000
+        summary["dns_check"] = {
+            "host": "api.x.com",
+            "resolved_ips": list(set(a[4][0] for a in ips)),
+            "ms": round(dns_ms, 3),
+        }
+    except Exception as e:
+        summary["dns_check"] = {"error": str(e)}
+
+    # Account pool health
+    summary["account_pool"] = acct_pool.stats()
+
+    # Server info
+    summary["server"] = {
+        "region": os.environ.get("RAILWAY_REGION", os.environ.get("FLY_REGION", "unknown")),
+        "workers": os.environ.get("WORKERS", "?"),
+        "python": sys.version.split()[0],
+    }
+
+    return ORJSONResponse({
+        "runs": results,
+        "summary": summary,
+    })
+
+
 # Run with: uvicorn api.src.main:app --reload
 if __name__ == "__main__":
     import uvicorn
