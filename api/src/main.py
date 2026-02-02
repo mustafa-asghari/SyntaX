@@ -279,6 +279,20 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def strip_query_params(request: Request, call_next):
+    """Strip whitespace from query params (Cloudflare CDN appends \\n)."""
+    scope = request.scope
+    qs = scope.get("query_string", b"")
+    if qs and (b"\n" in qs or b"\r" in qs or b"%0A" in qs or b"%0a" in qs):
+        from urllib.parse import parse_qsl, urlencode
+        cleaned = urlencode(
+            [(k, v.strip()) for k, v in parse_qsl(qs.decode("latin-1"))],
+        )
+        scope["query_string"] = cleaned.encode("latin-1")
+    return await call_next(request)
+
+
 @app.get("/")
 async def root():
     return {
@@ -618,7 +632,7 @@ async def search(
     total_time = (time.perf_counter() - start_time) * 1000
 
     # Return ORJSONResponse directly — skip Pydantic validation overhead
-    return ORJSONResponse({
+    response = ORJSONResponse({
         "success": True,
         "data": tweet_dicts,
         "error": None,
@@ -630,6 +644,19 @@ async def search(
             "cache_layer": cache_layer,
         },
     })
+
+    # Cloudflare edge caching — huge latency win for repeated queries.
+    # fresh=true: no edge cache. Otherwise: let CF cache for 30s, serve stale for 60s.
+    if fresh:
+        response.headers["Cache-Control"] = "no-store"
+    elif tweet_dicts:
+        response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
+        response.headers["CDN-Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
+    else:
+        # Don't cache empty results at edge
+        response.headers["Cache-Control"] = "no-store"
+
+    return response
 
 
 # ── Social Endpoints ────────────────────────────────────────
