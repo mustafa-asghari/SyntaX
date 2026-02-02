@@ -11,7 +11,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -23,7 +23,7 @@ from token_pool import get_pool, AnyTokenPool
 from proxy_manager import get_proxy_manager
 from endpoints.user import get_user_by_username, get_user_by_id
 from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
-from endpoints.search import search_tweets, search_tweets_raw
+from endpoints.search import search_tweets_raw
 from endpoints.social import get_followers, get_following
 from account_pool import get_account_pool
 
@@ -574,9 +574,8 @@ async def search(
     cursor: Optional[str] = Query(default=None),
     fresh: str = Query(default="false", description="Bypass cache"),
 ):
-    """Search for tweets."""
+    """Search for tweets. Returns raw X API JSON bytes — zero parsing/serialization."""
     fresh = _parse_fresh(fresh)
-    start_time = time.perf_counter()
 
     async def _fetch():
         acct_pool = get_account_pool()
@@ -589,11 +588,11 @@ async def search(
         auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
                               session=session)
         try:
-            tweet_dicts, next_cursor, api_time = await asyncio.to_thread(
+            raw_bytes, next_cursor, api_time = await asyncio.to_thread(
                 search_tweets_raw, q, auth_client, count, product, cursor,
             )
             acct_pool.release(account, success=True, status_code=200)
-            return tweet_dicts, next_cursor
+            return raw_bytes, next_cursor
         except Exception as e:
             err_str = str(e)
             status = 429 if "429" in err_str else 403 if "403" in err_str else 500
@@ -603,7 +602,7 @@ async def search(
             auth_client.close()
             account.release_session(session)
 
-    tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
+    raw_bytes, next_cursor, cache_layer = await cache_mgr.search_raw(
         query=q,
         product=product,
         count=count,
@@ -611,32 +610,23 @@ async def search(
         fetch_fn=_fetch,
         fresh=fresh,
     )
-    total_time = (time.perf_counter() - start_time) * 1000
 
-    response = ORJSONResponse({
-        "success": True,
-        "data": tweet_dicts,
-        "error": None,
-        "meta": {
-            "response_time_ms": round(total_time, 1),
-            "count": len(tweet_dicts),
-            "next_cursor": next_cursor,
-            "cache_hit": cache_layer != "live",
-            "cache_layer": cache_layer,
-        },
-    })
+    # Pass raw X API bytes straight through — no parse, no serialize
+    response = Response(
+        content=raw_bytes,
+        media_type="application/json",
+    )
     response.headers["X-Cache-Layer"] = cache_layer
     response.headers["X-Cache-Hit"] = "1" if cache_layer != "live" else "0"
+    if next_cursor:
+        response.headers["X-Next-Cursor"] = next_cursor
 
-    # Cloudflare edge caching — keeps popular queries warm at edge.
-    # fresh=true: no edge cache. Otherwise: CF caches 5 min, serves stale for 5 more.
     if fresh:
         response.headers["Cache-Control"] = "no-store"
-    elif tweet_dicts:
+    elif raw_bytes:
         response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=300"
         response.headers["CDN-Cache-Control"] = "public, max-age=300, stale-while-revalidate=300"
     else:
-        # Don't cache empty results at edge
         response.headers["Cache-Control"] = "no-store"
 
     return response

@@ -500,13 +500,66 @@ class XClient:
         if self.token_set:
             self.token_set.request_count += 1
 
-        # orjson.loads is already fast, but we ensure we use bytes directly
         data = orjson.loads(response.content)
 
         if rd:
             rd.end()
 
         return data, elapsed_ms
+
+    def graphql_request_raw(
+        self,
+        query_id: str,
+        operation_name: str,
+        variables: Dict[str, Any],
+        features: Optional[Dict[str, bool]] = None,
+        field_toggles: Optional[Dict[str, bool]] = None,
+    ) -> Tuple[bytes, float]:
+        """
+        Make a GraphQL request and return raw response bytes — no JSON parse.
+        """
+        self._check_token_health()
+
+        path = f"/graphql/{query_id}/{operation_name}"
+        url = f"https://api.x.com{path}"
+
+        if features is None:
+            features_json = _FEATURES_JSON
+        else:
+            features_json = orjson.dumps(features).decode()
+
+        params = {
+            "variables": orjson.dumps(variables).decode(),
+            "features": features_json,
+        }
+        if field_toggles:
+            if field_toggles is FIELD_TOGGLES:
+                params["fieldToggles"] = _FIELD_TOGGLES_JSON
+            else:
+                params["fieldToggles"] = orjson.dumps(field_toggles).decode()
+
+        headers = self._get_headers(path=path)
+        cookies = self._get_cookies()
+
+        start_time = time.perf_counter()
+
+        response = self.session.get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=_DEFAULT_TIMEOUT,
+        )
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        self.session.cookies.clear()
+
+        response.raise_for_status()
+
+        if self.token_set:
+            self.token_set.request_count += 1
+
+        return response.content, elapsed_ms
 
     def graphql_request_batch(
         self,

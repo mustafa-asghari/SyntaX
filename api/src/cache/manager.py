@@ -154,7 +154,75 @@ class CacheManager:
         except Exception as e:
             print(f"[cache] SWR refresh failed for {cache_key}: {e}")
 
-    # ── Search-specific with Typesense L2 ────────────────────
+    # ── Raw search cache (zero parsing) ─────────────────────
+
+    async def search_raw(
+        self,
+        query: str,
+        product: str,
+        count: int,
+        cursor: Optional[str],
+        fetch_fn: Callable[[], Awaitable[tuple[bytes, Optional[str]]]],
+        fresh: bool = False,
+    ) -> tuple[bytes, Optional[str], str]:
+        """
+        Cache raw X API bytes. No JSON parse, no Typesense/ClickHouse.
+        fetch_fn returns (raw_bytes, next_cursor).
+        Returns (raw_bytes, next_cursor, cache_layer).
+        """
+        cache_key = make_key("searchraw", query, product, str(count), str(cursor or ""))
+        cursor_key = cache_key + ":cur"
+
+        if fresh:
+            raw_bytes, next_cursor = await fetch_fn()
+            if raw_bytes:
+                asyncio.create_task(self._cache_raw(cache_key, cursor_key, raw_bytes, next_cursor))
+            return raw_bytes, next_cursor, "live"
+
+        # Redis L1
+        result = await self.redis.get_raw(cache_key)
+        if result is not None:
+            cached_bytes, stored_at = result
+            age = time.time() - stored_at
+            # Grab cursor from companion key
+            cur_val = await self.redis._redis.get(cursor_key) if self.redis._redis else None
+            nc = cur_val.decode() if cur_val else None
+            if age < CacheConfig.SWR_THRESHOLD:
+                return cached_bytes, nc, "redis"
+            asyncio.create_task(self._swr_refresh_raw(cache_key, cursor_key, fetch_fn))
+            return cached_bytes, nc, "swr"
+
+        # Cache miss — coalesce + stale-on-error
+        try:
+            (raw_bytes, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+            if not coalesced and raw_bytes:
+                asyncio.create_task(self._cache_raw(cache_key, cursor_key, raw_bytes, next_cursor))
+            return raw_bytes, next_cursor, "coalesced" if coalesced else "live"
+        except Exception:
+            stale = await self.redis.get_raw(cache_key)
+            if stale is not None:
+                cached_bytes, _ = stale
+                cur_val = await self.redis._redis.get(cursor_key) if self.redis._redis else None
+                nc = cur_val.decode() if cur_val else None
+                return cached_bytes, nc, "stale"
+            raise
+
+    async def _cache_raw(self, key: str, cursor_key: str, raw_bytes: bytes, next_cursor: Optional[str]) -> None:
+        """Store raw bytes + cursor in Redis."""
+        await self.redis.set_raw(key, raw_bytes, CacheConfig.TTL_SEARCH)
+        if next_cursor and self.redis._redis:
+            await self.redis._redis.set(cursor_key, next_cursor.encode(), ex=CacheConfig.TTL_SEARCH)
+
+    async def _swr_refresh_raw(self, key: str, cursor_key: str,
+                                fetch_fn: Callable[[], Awaitable[tuple[bytes, Optional[str]]]]) -> None:
+        """Background SWR refresh for raw search bytes."""
+        try:
+            raw_bytes, next_cursor = await fetch_fn()
+            await self._cache_raw(key, cursor_key, raw_bytes, next_cursor)
+        except Exception:
+            pass
+
+    # ── Search-specific with Typesense L2 (legacy) ───────────
 
     async def search_with_typesense_fallback(
         self,

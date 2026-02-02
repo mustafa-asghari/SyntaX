@@ -5,6 +5,7 @@ All values stored as: {"data": <payload>, "stored_at": <unix_timestamp>}
 """
 
 import hashlib
+import struct
 import time
 import asyncio
 from typing import Any, Optional
@@ -101,6 +102,23 @@ class RedisCache:
             envelope = {"data": data, "stored_at": now}
             pipe.set(key, orjson.dumps(envelope), ex=ttl)
         await pipe.execute()
+
+    async def set_raw(self, key: str, data: bytes, ttl: int) -> None:
+        """Store raw bytes with 8-byte timestamp prefix — no JSON wrapping."""
+        if not self._redis:
+            return
+        ts = struct.pack("!d", time.time())  # 8 bytes, big-endian double
+        await self._redis.set(key, ts + data, ex=ttl)
+
+    async def get_raw(self, key: str) -> Optional[tuple[bytes, float]]:
+        """Get raw bytes + stored_at timestamp. Returns (data_bytes, stored_at) or None."""
+        if not self._redis:
+            return None
+        raw = await self._redis.get(key)
+        if raw is None or len(raw) < 8:
+            return None
+        stored_at = struct.unpack("!d", raw[:8])[0]
+        return raw[8:], stored_at
 
     async def delete(self, key: str) -> None:
         if self._redis:
