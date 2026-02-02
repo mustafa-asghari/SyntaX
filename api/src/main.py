@@ -226,9 +226,34 @@ async def lifespan(app: FastAPI):
     cache_mgr = CacheManager()
     await cache_mgr.connect()
 
+    # Background token replenishment — keep pool healthy so requests never
+    # hit the slow inline create_token_set() path
+    _replenish_stop = asyncio.Event()
+
+    async def _replenish_tokens():
+        target = 10
+        while not _replenish_stop.is_set():
+            try:
+                if pool and pool.pool_size() < target:
+                    proxy = None
+                    if _proxy_manager and _proxy_manager.has_proxies:
+                        pcfg = _proxy_manager.get_proxy()
+                        if pcfg:
+                            proxy = pcfg.to_curl_cffi_format()
+                    ts = await asyncio.to_thread(create_token_set, proxy=proxy)
+                    if ts and pool:
+                        pool.add_token(ts)
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
+    replenish_task = asyncio.create_task(_replenish_tokens())
+
     yield
 
     print("Shutting down SyntaX API...")
+    _replenish_stop.set()
+    replenish_task.cancel()
     if cache_mgr:
         await cache_mgr.close()
     if session_pool:

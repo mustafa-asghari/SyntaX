@@ -59,6 +59,6 @@ class CacheConfig:
     CH_FLUSH_INTERVAL: int = 5
 
     # Cross-process coalescing (Redis lock)
-    COALESCE_LOCK_TTL: int = int(os.getenv("COALESCE_LOCK_TTL", "10"))
-    COALESCE_WAIT_TIMEOUT: float = float(os.getenv("COALESCE_WAIT_TIMEOUT", "10"))
+    COALESCE_LOCK_TTL: int = int(os.getenv("COALESCE_LOCK_TTL", "3"))
+    COALESCE_WAIT_TIMEOUT: float = float(os.getenv("COALESCE_WAIT_TIMEOUT", "2"))
     COALESCE_WAIT_INTERVAL: float = float(os.getenv("COALESCE_WAIT_INTERVAL", "0.05"))

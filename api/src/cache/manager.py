@@ -130,34 +130,9 @@ class CacheManager:
             asyncio.create_task(self._swr_refresh(cache_key, ttl, fetch_fn))
             return envelope["data"], "swr"
 
-        # Cache miss — coalesce concurrent requests across processes via Redis lock
-        if self.redis.connected:
-            lock_key = f"{cache_key}:lock"
-            got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
-            if got_lock:
-                try:
-                    # Double-check: cache may have been populated while we waited
-                    envelope = await self.redis.get(cache_key)
-                    if envelope is not None:
-                        return envelope["data"], "coalesced"
-                    data = await fetch_fn()
-                    await self.redis.set(cache_key, data, ttl)
-                    return data, "live"
-                finally:
-                    await self.redis.release_lock(lock_key)
-            # Wait for another instance to populate cache
-            envelope = await self.redis.wait_for_key(
-                cache_key,
-                CacheConfig.COALESCE_WAIT_TIMEOUT,
-                CacheConfig.COALESCE_WAIT_INTERVAL,
-            )
-            if envelope is not None:
-                return envelope["data"], "coalesced"
-
-        # Fallback: in-process coalescing only
+        # Cache miss — in-process coalescing, non-blocking cache write
         (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
         if not coalesced:
-            # Fire-and-forget: write cache in background, return immediately
             asyncio.create_task(self.redis.set(cache_key, data, ttl))
         return data, "coalesced" if coalesced else "live"
 
@@ -215,49 +190,11 @@ class CacheManager:
             )
             return cached["tweets"], cached.get("next_cursor"), "swr"
 
-        # L2: Typesense search → hydrate from Redis individual tweets
-        if self.typesense.available and not cursor:
-            tweet_ids = await self.typesense.search(query, limit=count)
-            if tweet_ids:
-                hydrated = await self._hydrate_tweets(tweet_ids)
-                if hydrated and len(hydrated) >= len(tweet_ids) * 0.8:
-                    # Good enough — cache the response and return
-                    await self.redis.set(
-                        cache_key,
-                        {"tweets": hydrated, "next_cursor": None},
-                        CacheConfig.TTL_SEARCH,
-                    )
-                    self._log_search_query(query, product, len(hydrated), True, time.time() - start)
-                    return hydrated, None, "typesense"
+        # L2: Skip Typesense on miss — go straight to live fetch.
+        # Typesense hydration requires individual tweet keys in Redis which are
+        # often cold on first search. Going live is faster than Typesense + mget.
 
-        # L3: Live fetch with cross-process coalescing
-        if self.redis.connected:
-            lock_key = f"{cache_key}:lock"
-            got_lock = await self.redis.try_lock(lock_key, CacheConfig.COALESCE_LOCK_TTL)
-            if got_lock:
-                try:
-                    # Double-check: cache may have been populated while we waited
-                    envelope = await self.redis.get(cache_key)
-                    if envelope is not None:
-                        cached = envelope["data"]
-                        self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
-                        return cached["tweets"], cached.get("next_cursor"), "coalesced"
-                    tweet_dicts, next_cursor = await fetch_fn()
-                    await self._write_through_search(cache_key, tweet_dicts, next_cursor)
-                    self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
-                    return tweet_dicts, next_cursor, "live"
-                finally:
-                    await self.redis.release_lock(lock_key)
-            envelope = await self.redis.wait_for_key(
-                cache_key,
-                CacheConfig.COALESCE_WAIT_TIMEOUT,
-                CacheConfig.COALESCE_WAIT_INTERVAL,
-            )
-            if envelope is not None:
-                cached = envelope["data"]
-                self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
-                return cached["tweets"], cached.get("next_cursor"), "coalesced"
-
+        # L3: Live fetch with in-process coalescing (no blocking Redis locks)
         (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
         if not coalesced:
             # Fire-and-forget: write all cache layers in background

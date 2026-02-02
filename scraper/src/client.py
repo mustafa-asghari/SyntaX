@@ -182,10 +182,23 @@ class TransactionIDGenerator:
             return
 
         if not self._ready.is_set():
+            # First init still running — wait for background thread
             self._ready.wait(timeout=20)
             if self._ct is not None:
                 return
+            # Background init failed — do it inline (first request only)
+            self._init_sync()
+            return
 
+        # TTL expired — refresh in background, keep using stale generator
+        if self._ct is not None:
+            # Stale but usable — trigger background refresh, don't block
+            self._ready.clear()
+            t = threading.Thread(target=self._init_sync, daemon=True)
+            t.start()
+            return
+
+        # No generator at all — must init inline
         self._init_sync()
 
     def get_session_cookies(self) -> Dict[str, str]:
