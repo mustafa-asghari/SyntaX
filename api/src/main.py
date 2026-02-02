@@ -568,12 +568,16 @@ async def search(
     start_time = time.perf_counter()
 
     async def _fetch():
-        # Search is auth-gated — skip guest token, go straight to account pool.
+        # Search is auth-gated — go straight to account pool, no guest fallback.
         acct_pool = get_account_pool()
-        account = acct_pool.acquire() if acct_pool.has_accounts else None
+        last_exc = None
 
-        if account:
-            # Fast path: use account's pre-warmed session directly
+        # Retry budget: max 1 retry for timeout/5xx only. No retries on 429/403.
+        for attempt in range(2):
+            account = acct_pool.acquire() if acct_pool.has_accounts else None
+            if not account:
+                raise HTTPException(status_code=503, detail="No auth accounts available")
+
             from client import token_set_from_account
             auth_ts = token_set_from_account(account)
             session = account.acquire_session()
@@ -586,30 +590,22 @@ async def search(
                 acct_pool.release(account, success=True, status_code=200)
                 return [t.to_dict() for t in tweets], next_cursor
             except Exception as e:
-                status = 429 if "429" in str(e) else 403 if "403" in str(e) else 500
+                err_str = str(e)
+                status = 429 if "429" in err_str else 403 if "403" in err_str else 500
                 acct_pool.release(account, success=False, status_code=status)
-                raise HTTPException(status_code=status, detail=str(e))
+                last_exc = e
+                # Don't retry on 429/403 — those won't resolve with a retry
+                if status in (429, 403):
+                    raise
+                # Retry on timeout/5xx (attempt 0 → retry once)
+                if attempt == 0:
+                    continue
+                raise
             finally:
                 auth_client.close()
                 account.release_session(session)
-        else:
-            # No accounts — fall back to guest token (will likely fail for search)
-            client, token_set, session, proxy = _get_client()
-            try:
-                tweets, next_cursor, api_time = await asyncio.to_thread(
-                    search_tweets, q, client, count, product, cursor,
-                )
-                if pool:
-                    pool.return_token(token_set, success=True)
-                return [t.to_dict() for t in tweets], next_cursor
-            except Exception as e:
-                if pool:
-                    pool.return_token(token_set, success=False)
-                raise HTTPException(status_code=500, detail=str(e))
-            finally:
-                client.close()
-                if session and session_pool:
-                    session_pool.release(session, proxy=proxy)
+
+        raise last_exc
 
     tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
         query=q,

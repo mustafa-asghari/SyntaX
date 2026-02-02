@@ -117,7 +117,8 @@ class CacheManager:
         if fresh:
             # fresh=true: skip all cache reads/locks, fetch directly, write-back in background
             data = await fetch_fn()
-            asyncio.create_task(self.redis.set(cache_key, data, ttl))
+            if data:
+                asyncio.create_task(self.redis.set(cache_key, data, ttl))
             return data, "live"
 
         # Try Redis L1
@@ -130,11 +131,18 @@ class CacheManager:
             asyncio.create_task(self._swr_refresh(cache_key, ttl, fetch_fn))
             return envelope["data"], "swr"
 
-        # Cache miss — in-process coalescing, non-blocking cache write
-        (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
-        if not coalesced:
-            asyncio.create_task(self.redis.set(cache_key, data, ttl))
-        return data, "coalesced" if coalesced else "live"
+        # Cache miss — in-process coalescing + stale-on-error
+        try:
+            (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
+            if not coalesced and data:
+                asyncio.create_task(self.redis.set(cache_key, data, ttl))
+            return data, "coalesced" if coalesced else "live"
+        except Exception:
+            # Stale-on-error: if upstream fails, try serving stale cache
+            stale = await self.redis.get(cache_key)
+            if stale is not None:
+                return stale["data"], "stale"
+            raise
 
     async def _swr_refresh(
         self,
@@ -172,7 +180,9 @@ class CacheManager:
         if fresh:
             # fresh=true: skip all cache reads/locks, fetch directly, write-back in background
             tweet_dicts, next_cursor = await fetch_fn()
-            asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+            # Only cache non-empty results
+            if tweet_dicts:
+                asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
             self._log_search_query(query, product, len(tweet_dicts), False, time.time() - start)
             return tweet_dicts, next_cursor, "live"
 
@@ -190,17 +200,22 @@ class CacheManager:
             )
             return cached["tweets"], cached.get("next_cursor"), "swr"
 
-        # L2: Skip Typesense on miss — go straight to live fetch.
-        # Typesense hydration requires individual tweet keys in Redis which are
-        # often cold on first search. Going live is faster than Typesense + mget.
-
-        # L3: Live fetch with in-process coalescing (no blocking Redis locks)
-        (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
-        if not coalesced:
-            # Fire-and-forget: write all cache layers in background
-            asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
-        self._log_search_query(query, product, len(tweet_dicts), coalesced, time.time() - start)
-        return tweet_dicts, next_cursor, "coalesced" if coalesced else "live"
+        # Cache miss — live fetch with in-process coalescing + stale-on-error
+        try:
+            (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+            if not coalesced and tweet_dicts:
+                # Only cache non-empty results
+                asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
+            self._log_search_query(query, product, len(tweet_dicts), coalesced, time.time() - start)
+            return tweet_dicts, next_cursor, "coalesced" if coalesced else "live"
+        except Exception:
+            # Stale-on-error: if upstream fails, try serving stale cache
+            stale = await self.redis.get(cache_key)
+            if stale is not None:
+                cached = stale["data"]
+                self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
+                return cached["tweets"], cached.get("next_cursor"), "stale"
+            raise
 
     async def _hydrate_tweets(self, tweet_ids: list[str]) -> list[dict]:
         """Hydrate tweet IDs from Redis individual tweet cache."""
