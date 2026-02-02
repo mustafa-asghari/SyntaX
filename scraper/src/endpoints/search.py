@@ -101,7 +101,7 @@ def search_tweets(
         elif "403" in str(e):
             status = 403
         pool.release(account, success=False, status_code=status)
-        return [], None, 0.0
+        raise
     finally:
         auth_client.close()  # no-op for external session
         account.release_session(session)

@@ -10,12 +10,22 @@ Provides:
 import asyncio
 import time
 from typing import Any, Callable, Awaitable, Optional
+from contextlib import nullcontext
 
 from .config import CacheConfig
 from .redis_cache import RedisCache, make_key
 from .typesense_cache import TypesenseCache
 from .clickhouse_writer import ClickHouseWriter
 from .coalescer import Coalescer
+
+try:
+    from ..telemetry import set_field, stage
+except Exception:
+    # Fallback for contexts where telemetry isn't initialized.
+    stage = lambda _name: nullcontext()  # type: ignore
+
+    def set_field(_key: str, _value: Any) -> None:
+        return
 
 
 class CacheManager:
@@ -116,15 +126,18 @@ class CacheManager:
         """
         if fresh:
             # fresh=true: skip all cache reads/locks, fetch directly, write-back in background
-            data = await fetch_fn()
+            with stage("cache_bypass_fetch"):
+                data = await fetch_fn()
             if data:
                 asyncio.create_task(self.redis.set(cache_key, data, ttl))
             return data, "live"
 
         # Try Redis L1
-        envelope = await self.redis.get(cache_key)
+        with stage("redis_get"):
+            envelope = await self.redis.get(cache_key)
         if envelope is not None:
             age = time.time() - envelope.get("stored_at", 0)
+            set_field("cache_age_s", round(age, 3))
             if age < CacheConfig.SWR_THRESHOLD:
                 return envelope["data"], "redis"
             # SWR: return stale, refresh in background
@@ -133,13 +146,16 @@ class CacheManager:
 
         # Cache miss — in-process coalescing + stale-on-error
         try:
-            (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
+            with stage("coalesce_wait"):
+                (data, coalesced) = await self.coalescer.do(cache_key, fetch_fn)
+            set_field("coalesced", coalesced)
             if not coalesced and data:
                 asyncio.create_task(self.redis.set(cache_key, data, ttl))
             return data, "coalesced" if coalesced else "live"
         except Exception:
             # Stale-on-error: if upstream fails, try serving stale cache
-            stale = await self.redis.get(cache_key)
+            with stage("redis_get_stale_on_error"):
+                stale = await self.redis.get(cache_key)
             if stale is not None:
                 return stale["data"], "stale"
             raise
@@ -179,7 +195,8 @@ class CacheManager:
 
         if fresh:
             # fresh=true: skip all cache reads/locks, fetch directly, write-back in background
-            tweet_dicts, next_cursor = await fetch_fn()
+            with stage("cache_bypass_fetch"):
+                tweet_dicts, next_cursor = await fetch_fn()
             # Only cache non-empty results
             if tweet_dicts:
                 asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
@@ -187,9 +204,11 @@ class CacheManager:
             return tweet_dicts, next_cursor, "live"
 
         # L1: Redis full response
-        envelope = await self.redis.get(cache_key)
+        with stage("redis_get"):
+            envelope = await self.redis.get(cache_key)
         if envelope is not None:
             age = time.time() - envelope.get("stored_at", 0)
+            set_field("cache_age_s", round(age, 3))
             cached = envelope["data"]
             self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)
             if age < CacheConfig.SWR_THRESHOLD:
@@ -202,7 +221,9 @@ class CacheManager:
 
         # Cache miss — live fetch with in-process coalescing + stale-on-error
         try:
-            (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+            with stage("coalesce_wait"):
+                (tweet_dicts, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
+            set_field("coalesced", coalesced)
             if not coalesced and tweet_dicts:
                 # Only cache non-empty results
                 asyncio.create_task(self._write_through_search(cache_key, tweet_dicts, next_cursor))
@@ -210,7 +231,8 @@ class CacheManager:
             return tweet_dicts, next_cursor, "coalesced" if coalesced else "live"
         except Exception:
             # Stale-on-error: if upstream fails, try serving stale cache
-            stale = await self.redis.get(cache_key)
+            with stage("redis_get_stale_on_error"):
+                stale = await self.redis.get(cache_key)
             if stale is not None:
                 cached = stale["data"]
                 self._log_search_query(query, product, len(cached.get("tweets", [])), True, time.time() - start)

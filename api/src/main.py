@@ -10,6 +10,7 @@ import time
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
+import orjson
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,15 @@ from account_pool import get_account_pool
 from .cache import CacheManager
 from .cache.redis_cache import make_key
 from .cache.config import CacheConfig
+from .telemetry import (
+    finish_request,
+    new_request_id,
+    server_timing_header,
+    set_field,
+    snapshot,
+    stage,
+    start_request,
+)
 
 
 def _parse_fresh(val: str) -> bool:
@@ -282,6 +292,77 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class _PerfASGIMiddleware:
+    """Pure ASGI perf middleware — no BaseHTTPMiddleware overhead."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        # Extract request-id from headers
+        headers = dict(
+            (k.decode("latin-1"), v.decode("latin-1"))
+            for k, v in scope.get("headers", [])
+        )
+        request_id = (headers.get("x-request-id") or "").strip() or new_request_id()
+        token = start_request(request_id)
+
+        path = scope.get("path", "")
+        set_field("method", scope.get("method", ""))
+        set_field("path", path)
+        qs = scope.get("query_string", b"").decode("latin-1")
+        set_field("query", qs)
+
+        status_code = 200
+        first_send = True
+
+        async def send_wrapper(message):
+            nonlocal status_code, first_send
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 200)
+                set_field("status_code", status_code)
+                snap = snapshot()
+                # Inject headers into the response
+                extra_headers = [
+                    (b"x-request-id", request_id.encode()),
+                    (b"x-server-time-ms", str(round(snap["total_ms"], 1)).encode()),
+                ]
+                th = server_timing_header()
+                if th:
+                    extra_headers.append((b"server-timing", th.encode()))
+                message["headers"] = list(message.get("headers", [])) + extra_headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            finish_request(token)
+            raise
+
+        # One summary log per request (non-verbose)
+        snap = snapshot()
+        set_field("status_code", status_code)
+        print(
+            orjson.dumps(
+                {
+                    "event": "request_perf",
+                    "request_id": request_id,
+                    "status_code": status_code,
+                    "total_ms": snap["total_ms"],
+                    "stages": snap["stages"],
+                    **snap["fields"],
+                }
+            ).decode()
+        )
+        finish_request(token)
+
+
+app.add_middleware(_PerfASGIMiddleware)
 
 
 @app.get("/")
@@ -576,71 +657,82 @@ async def search(
 ):
     """Search for tweets."""
     fresh = _parse_fresh(fresh)
+    set_field("fresh", fresh)
+    set_field("q_len", len(q))
+    set_field("count", count)
+    set_field("product", product)
+    set_field("has_cursor", bool(cursor))
     start_time = time.perf_counter()
 
     async def _fetch():
-        # Search is auth-gated — go straight to account pool, no guest fallback.
-        acct_pool = get_account_pool()
-        last_exc = None
+        # Search is auth-gated — go straight to account pool, no retry.
+        # Retrying doubles TTFB; stale-on-error in cache layer handles failures.
+        with stage("auth_account_acquire"):
+            acct_pool = get_account_pool()
 
-        # Retry budget: max 1 retry for timeout/5xx only. No retries on 429/403.
-        for attempt in range(2):
+        with stage("auth_pool_acquire"):
             account = acct_pool.acquire() if acct_pool.has_accounts else None
-            if not account:
-                raise HTTPException(status_code=503, detail="No auth accounts available")
+        if not account:
+            raise HTTPException(status_code=503, detail="No auth accounts available")
 
-            from client import token_set_from_account
-            auth_ts = token_set_from_account(account)
+        from client import token_set_from_account
+        auth_ts = token_set_from_account(account)
+        with stage("auth_session_acquire"):
             session = account.acquire_session()
-            auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
-                                  session=session)
-            try:
+        auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
+                              session=session)
+        try:
+            with stage("upstream_fetch"):
                 tweets, next_cursor, api_time = await asyncio.to_thread(
                     search_tweets, q, auth_client, count, product, cursor,
                 )
-                acct_pool.release(account, success=True, status_code=200)
-                return [t.to_dict() for t in tweets], next_cursor
-            except Exception as e:
-                err_str = str(e)
-                status = 429 if "429" in err_str else 403 if "403" in err_str else 500
-                acct_pool.release(account, success=False, status_code=status)
-                last_exc = e
-                # Don't retry on 429/403 — those won't resolve with a retry
-                if status in (429, 403):
-                    raise
-                # Retry on timeout/5xx (attempt 0 → retry once)
-                if attempt == 0:
-                    continue
-                raise
-            finally:
-                auth_client.close()
+            set_field("upstream_ms", round(api_time, 1))
+            set_field("upstream_count", len(tweets))
+            acct_pool.release(account, success=True, status_code=200)
+            with stage("transform"):
+                tweet_dicts = [t.to_dict() for t in tweets]
+            return tweet_dicts, next_cursor
+        except Exception as e:
+            err_str = str(e)
+            status = 429 if "429" in err_str else 403 if "403" in err_str else 500
+            set_field("upstream_status", status)
+            set_field("upstream_error", err_str[:180])
+            acct_pool.release(account, success=False, status_code=status)
+            raise
+        finally:
+            auth_client.close()
+            with stage("auth_session_release"):
                 account.release_session(session)
 
-        raise last_exc
-
-    tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
-        query=q,
-        product=product,
-        count=count,
-        cursor=cursor,
-        fetch_fn=_fetch,
-        fresh=fresh,
-    )
+    with stage("cache_lookup"):
+        tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
+            query=q,
+            product=product,
+            count=count,
+            cursor=cursor,
+            fetch_fn=_fetch,
+            fresh=fresh,
+        )
+    set_field("cache_layer", cache_layer)
+    set_field("cache_hit", cache_layer != "live")
     total_time = (time.perf_counter() - start_time) * 1000
 
     # Return ORJSONResponse directly — skip Pydantic validation overhead
-    response = ORJSONResponse({
-        "success": True,
-        "data": tweet_dicts,
-        "error": None,
-        "meta": {
-            "response_time_ms": round(total_time, 1),
-            "count": len(tweet_dicts),
-            "next_cursor": next_cursor,
-            "cache_hit": cache_layer != "live",
-            "cache_layer": cache_layer,
-        },
-    })
+    with stage("serialization"):
+        response = ORJSONResponse({
+            "success": True,
+            "data": tweet_dicts,
+            "error": None,
+            "meta": {
+                "response_time_ms": round(total_time, 1),
+                "count": len(tweet_dicts),
+                "next_cursor": next_cursor,
+                "cache_hit": cache_layer != "live",
+                "cache_layer": cache_layer,
+            },
+        })
+    response.headers["X-Cache-Layer"] = cache_layer
+    response.headers["X-Cache-Hit"] = "1" if cache_layer != "live" else "0"
 
     # Cloudflare edge caching — huge latency win for repeated queries.
     # fresh=true: no edge cache. Otherwise: let CF cache for 30s, serve stale for 60s.

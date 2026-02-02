@@ -46,9 +46,10 @@ from config import (
 from debug import RequestDebug, SpeedDebugger
 
 # ── Constants ───────────────────────────────────────────────
-# Aggressive but safe timeouts (X API typically responds in <500ms)
-_CONNECT_TIMEOUT = 3
-_READ_TIMEOUT = 6
+# Tight timeouts — X API responds in <2s or it's stalled.
+# Don't waste TTFB budget waiting for a dead upstream.
+_CONNECT_TIMEOUT = 2
+_READ_TIMEOUT = 4
 _DEFAULT_TIMEOUT = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 
 # Thread pool for parallel requests (reused across all clients)
