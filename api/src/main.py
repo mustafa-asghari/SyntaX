@@ -32,6 +32,11 @@ from .cache.redis_cache import make_key
 from .cache.config import CacheConfig
 
 
+def _parse_fresh(val: str) -> bool:
+    """Parse fresh param — tolerates trailing whitespace from CDN proxies."""
+    return val.strip().lower() in ("true", "1", "yes")
+
+
 # Response models
 class APIResponse(BaseModel):
     success: bool
@@ -279,20 +284,6 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def strip_query_params(request: Request, call_next):
-    """Strip whitespace from query params (Cloudflare CDN appends \\n)."""
-    scope = request.scope
-    qs = scope.get("query_string", b"")
-    if qs and (b"\n" in qs or b"\r" in qs or b"%0A" in qs or b"%0a" in qs):
-        from urllib.parse import parse_qsl, urlencode
-        cleaned = urlencode(
-            [(k, v.strip()) for k, v in parse_qsl(qs.decode("latin-1"))],
-        )
-        scope["query_string"] = cleaned.encode("latin-1")
-    return await call_next(request)
-
-
 @app.get("/")
 async def root():
     return {
@@ -331,9 +322,10 @@ async def debug_health():
 @app.get("/v1/users/{username}", response_model=APIResponse)
 async def get_user(
     username: str,
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get user profile by username."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("profile", username.lower())
 
@@ -376,9 +368,10 @@ async def get_user(
 @app.get("/v1/users/id/{user_id}", response_model=APIResponse)
 async def get_user_by_rest_id(
     user_id: str,
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get user profile by numeric user ID."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("profile", user_id)
 
@@ -424,9 +417,10 @@ async def get_user_by_rest_id(
 @app.get("/v1/tweets/{tweet_id}", response_model=APIResponse)
 async def get_tweet(
     tweet_id: str,
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get a single tweet by ID."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("tweet", tweet_id)
 
@@ -469,9 +463,10 @@ async def get_tweet(
 @app.get("/v1/tweets/{tweet_id}/detail", response_model=APIResponse)
 async def get_tweet_with_replies(
     tweet_id: str,
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get tweet detail with conversation thread."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("tweet_detail", tweet_id)
 
@@ -520,9 +515,10 @@ async def get_tweets_by_user(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get tweets from a user's timeline. Requires numeric user_id."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("user_tweets", user_id, str(count), str(cursor or ""))
 
@@ -576,9 +572,10 @@ async def search(
     count: int = Query(default=20, le=40),
     product: str = Query(default="Top", description="Top, Latest, People, Photos, Videos"),
     cursor: Optional[str] = Query(default=None),
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Search for tweets."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
 
     async def _fetch():
@@ -667,9 +664,10 @@ async def get_user_followers(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get a user's followers. Requires numeric user_id. Auth-gated."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("social", "followers", user_id, str(count), str(cursor or ""))
 
@@ -719,9 +717,10 @@ async def get_user_following(
     user_id: str,
     count: int = Query(default=20, le=40),
     cursor: Optional[str] = Query(default=None),
-    fresh: bool = Query(default=False, description="Bypass cache"),
+    fresh: str = Query(default="false", description="Bypass cache"),
 ):
     """Get users that a user follows. Requires numeric user_id. Auth-gated."""
+    fresh = _parse_fresh(fresh)
     start_time = time.perf_counter()
     cache_key = make_key("social", "following", user_id, str(count), str(cursor or ""))
 
