@@ -7,11 +7,10 @@ import asyncio
 import os
 import sys
 import time
-from typing import Optional, List
+from typing import Optional
 from contextlib import asynccontextmanager
 
-import orjson
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,27 +18,18 @@ from pydantic import BaseModel
 # Add scraper/src to path so absolute imports (from config, from client, etc.) work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper', 'src'))
 
-from client import XClient, create_token_set
+from client import XClient, create_token_set, token_set_from_account
 from token_pool import get_pool, AnyTokenPool
 from proxy_manager import get_proxy_manager
 from endpoints.user import get_user_by_username, get_user_by_id
 from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
-from endpoints.search import search_tweets
+from endpoints.search import search_tweets, search_tweets_raw
 from endpoints.social import get_followers, get_following
 from account_pool import get_account_pool
 
 from .cache import CacheManager
 from .cache.redis_cache import make_key
 from .cache.config import CacheConfig
-from .telemetry import (
-    finish_request,
-    new_request_id,
-    server_timing_header,
-    set_field,
-    snapshot,
-    stage,
-    start_request,
-)
 
 
 def _parse_fresh(val: str) -> bool:
@@ -292,77 +282,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class _PerfASGIMiddleware:
-    """Pure ASGI perf middleware — no BaseHTTPMiddleware overhead."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            return await self.app(scope, receive, send)
-
-        # Extract request-id from headers
-        headers = dict(
-            (k.decode("latin-1"), v.decode("latin-1"))
-            for k, v in scope.get("headers", [])
-        )
-        request_id = (headers.get("x-request-id") or "").strip() or new_request_id()
-        token = start_request(request_id)
-
-        path = scope.get("path", "")
-        set_field("method", scope.get("method", ""))
-        set_field("path", path)
-        qs = scope.get("query_string", b"").decode("latin-1")
-        set_field("query", qs)
-
-        status_code = 200
-        first_send = True
-
-        async def send_wrapper(message):
-            nonlocal status_code, first_send
-            if message["type"] == "http.response.start":
-                status_code = message.get("status", 200)
-                set_field("status_code", status_code)
-                snap = snapshot()
-                # Inject headers into the response
-                extra_headers = [
-                    (b"x-request-id", request_id.encode()),
-                    (b"x-server-time-ms", str(round(snap["total_ms"], 1)).encode()),
-                ]
-                th = server_timing_header()
-                if th:
-                    extra_headers.append((b"server-timing", th.encode()))
-                message["headers"] = list(message.get("headers", [])) + extra_headers
-            await send(message)
-
-        try:
-            await self.app(scope, receive, send_wrapper)
-        except Exception:
-            finish_request(token)
-            raise
-
-        # One summary log per request (non-verbose)
-        snap = snapshot()
-        set_field("status_code", status_code)
-        print(
-            orjson.dumps(
-                {
-                    "event": "request_perf",
-                    "request_id": request_id,
-                    "status_code": status_code,
-                    "total_ms": snap["total_ms"],
-                    "stages": snap["stages"],
-                    **snap["fields"],
-                }
-            ).decode()
-        )
-        finish_request(token)
-
-
-app.add_middleware(_PerfASGIMiddleware)
 
 
 @app.get("/")
@@ -657,80 +576,55 @@ async def search(
 ):
     """Search for tweets."""
     fresh = _parse_fresh(fresh)
-    set_field("fresh", fresh)
-    set_field("q_len", len(q))
-    set_field("count", count)
-    set_field("product", product)
-    set_field("has_cursor", bool(cursor))
     start_time = time.perf_counter()
 
     async def _fetch():
-        # Search is auth-gated — go straight to account pool, no retry.
-        # Retrying doubles TTFB; stale-on-error in cache layer handles failures.
-        with stage("auth_account_acquire"):
-            acct_pool = get_account_pool()
-
-        with stage("auth_pool_acquire"):
-            account = acct_pool.acquire() if acct_pool.has_accounts else None
+        acct_pool = get_account_pool()
+        account = acct_pool.acquire() if acct_pool.has_accounts else None
         if not account:
             raise HTTPException(status_code=503, detail="No auth accounts available")
 
-        from client import token_set_from_account
         auth_ts = token_set_from_account(account)
-        with stage("auth_session_acquire"):
-            session = account.acquire_session()
+        session = account.acquire_session()
         auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
                               session=session)
         try:
-            with stage("upstream_fetch"):
-                tweets, next_cursor, api_time = await asyncio.to_thread(
-                    search_tweets, q, auth_client, count, product, cursor,
-                )
-            set_field("upstream_ms", round(api_time, 1))
-            set_field("upstream_count", len(tweets))
+            tweet_dicts, next_cursor, api_time = await asyncio.to_thread(
+                search_tweets_raw, q, auth_client, count, product, cursor,
+            )
             acct_pool.release(account, success=True, status_code=200)
-            with stage("transform"):
-                tweet_dicts = [t.to_dict() for t in tweets]
             return tweet_dicts, next_cursor
         except Exception as e:
             err_str = str(e)
             status = 429 if "429" in err_str else 403 if "403" in err_str else 500
-            set_field("upstream_status", status)
-            set_field("upstream_error", err_str[:180])
             acct_pool.release(account, success=False, status_code=status)
             raise
         finally:
             auth_client.close()
-            with stage("auth_session_release"):
-                account.release_session(session)
+            account.release_session(session)
 
-    with stage("cache_lookup"):
-        tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
-            query=q,
-            product=product,
-            count=count,
-            cursor=cursor,
-            fetch_fn=_fetch,
-            fresh=fresh,
-        )
-    set_field("cache_layer", cache_layer)
-    set_field("cache_hit", cache_layer != "live")
+    tweet_dicts, next_cursor, cache_layer = await cache_mgr.search_with_typesense_fallback(
+        query=q,
+        product=product,
+        count=count,
+        cursor=cursor,
+        fetch_fn=_fetch,
+        fresh=fresh,
+    )
     total_time = (time.perf_counter() - start_time) * 1000
 
-    # Return ORJSONResponse directly — skip Pydantic validation overhead
-    with stage("serialization"):
-        response = ORJSONResponse({
-            "success": True,
-            "data": tweet_dicts,
-            "error": None,
-            "meta": {
-                "response_time_ms": round(total_time, 1),
-                "count": len(tweet_dicts),
-                "next_cursor": next_cursor,
-                "cache_hit": cache_layer != "live",
-                "cache_layer": cache_layer,
-            },
-        })
+    response = ORJSONResponse({
+        "success": True,
+        "data": tweet_dicts,
+        "error": None,
+        "meta": {
+            "response_time_ms": round(total_time, 1),
+            "count": len(tweet_dicts),
+            "next_cursor": next_cursor,
+            "cache_hit": cache_layer != "live",
+            "cache_layer": cache_layer,
+        },
+    })
     response.headers["X-Cache-Layer"] = cache_layer
     response.headers["X-Cache-Hit"] = "1" if cache_layer != "live" else "0"
 
@@ -866,237 +760,6 @@ async def pool_stats():
     if not pool:
         return {"error": "Pool not initialized"}
     return pool.pool_stats()
-
-
-# ── Super Debug Endpoint ───────────────────────────────────
-
-
-@app.get("/v1/debug/search-trace")
-async def debug_search_trace(
-    q: str = Query(default="bitcoin", description="Search query"),
-    count: int = Query(default=20, le=40),
-    product: str = Query(default="Top"),
-    runs: int = Query(default=3, le=10, description="Number of runs"),
-):
-    """
-    Deep timing trace of the search pipeline.
-    Times EVERY step: account acquire, session acquire, header build,
-    cookie build, token health check, TLS/DNS/TCP (via curl_cffi info),
-    upstream HTTP, JSON parse, tweet parse, transform, serialization.
-
-    Hit this endpoint and it tells you exactly where every ms goes.
-    """
-    import socket
-
-    results = []
-
-    for run_idx in range(runs):
-        trace = {"run": run_idx + 1, "steps": {}}
-        t = time.perf_counter
-
-        # 1. Account pool acquire
-        t0 = t()
-        acct_pool = get_account_pool()
-        account = acct_pool.acquire() if acct_pool.has_accounts else None
-        trace["steps"]["account_pool_acquire"] = round((t() - t0) * 1000, 3)
-
-        if not account:
-            trace["error"] = "No accounts available"
-            trace["steps"]["account_pool_stats"] = acct_pool.stats()
-            results.append(trace)
-            continue
-
-        trace["account_label"] = account.label
-        trace["account_requests"] = account.request_count
-        trace["account_has_proxy"] = bool(account.proxy)
-
-        # 2. Token set creation from account
-        t0 = t()
-        from client import token_set_from_account
-        auth_ts = token_set_from_account(account)
-        trace["steps"]["token_set_from_account"] = round((t() - t0) * 1000, 3)
-
-        # 3. Session acquire from pool
-        t0 = t()
-        session = account.acquire_session()
-        trace["steps"]["session_acquire"] = round((t() - t0) * 1000, 3)
-        trace["session_pool_size"] = len(account._sessions)
-
-        # 4. XClient creation
-        t0 = t()
-        auth_client = XClient(token_set=auth_ts, proxy=account.proxy_dict,
-                              session=session)
-        trace["steps"]["xclient_create"] = round((t() - t0) * 1000, 3)
-
-        try:
-            # 5. Inside graphql_request — manual decomposition
-            query_id = None
-            from config import QUERY_IDS, TWEET_FEATURES
-            query_id = QUERY_IDS.get("SearchTimeline")
-
-            variables = {
-                "rawQuery": q,
-                "count": count,
-                "querySource": "typed_query",
-                "product": product,
-            }
-
-            # 5a. Token health check
-            t0 = t()
-            auth_client._check_token_health()
-            trace["steps"]["token_health_check"] = round((t() - t0) * 1000, 3)
-
-            # 5b. Build URL + params
-            t0 = t()
-            path = f"/graphql/{query_id}/SearchTimeline"
-            url = f"https://api.x.com{path}"
-            params = {
-                "variables": orjson.dumps(variables).decode(),
-                "features": orjson.dumps(TWEET_FEATURES).decode(),
-            }
-            trace["steps"]["build_params"] = round((t() - t0) * 1000, 3)
-
-            # 5c. Build headers (includes txn ID generation)
-            t0 = t()
-            headers = auth_client._get_headers(path=path)
-            trace["steps"]["build_headers_and_txn_id"] = round((t() - t0) * 1000, 3)
-
-            # 5d. Build cookies
-            t0 = t()
-            cookies = auth_client._get_cookies()
-            trace["steps"]["build_cookies"] = round((t() - t0) * 1000, 3)
-
-            # 5e. THE HTTP CALL — this is where 95%+ of time goes
-            t0 = t()
-            response = await asyncio.to_thread(
-                session.get,
-                url,
-                params=params,
-                headers=headers,
-                cookies=cookies,
-                timeout=(2, 4),
-            )
-            http_elapsed = (t() - t0) * 1000
-            trace["steps"]["http_request_total"] = round(http_elapsed, 3)
-
-            # Extract curl_cffi connection info if available
-            try:
-                info = response.elapsed  # timedelta
-                trace["steps"]["http_elapsed_reported"] = round(info.total_seconds() * 1000, 3) if info else None
-            except Exception:
-                pass
-
-            trace["http_status"] = response.status_code
-            trace["http_response_bytes"] = len(response.content) if response.content else 0
-
-            # 5f. Cookie clear
-            t0 = t()
-            session.cookies.clear()
-            trace["steps"]["cookie_clear"] = round((t() - t0) * 1000, 3)
-
-            # 5g. JSON parse
-            t0 = t()
-            data = orjson.loads(response.content)
-            trace["steps"]["json_parse"] = round((t() - t0) * 1000, 3)
-
-            # 5h. Search response parse (extract tweets from GraphQL response)
-            t0 = t()
-            from endpoints.search import _parse_search_response
-            tweets, next_cursor = _parse_search_response(data)
-            trace["steps"]["parse_search_response"] = round((t() - t0) * 1000, 3)
-            trace["tweet_count"] = len(tweets)
-
-            # 5i. Transform tweets to dicts
-            t0 = t()
-            tweet_dicts = [tw.to_dict() for tw in tweets]
-            trace["steps"]["transform_to_dict"] = round((t() - t0) * 1000, 3)
-
-            # 5j. Serialization (simulate ORJSONResponse)
-            t0 = t()
-            payload = orjson.dumps({"data": tweet_dicts})
-            trace["steps"]["orjson_serialize"] = round((t() - t0) * 1000, 3)
-            trace["response_payload_bytes"] = len(payload)
-
-            acct_pool.release(account, success=True, status_code=200)
-
-        except Exception as e:
-            trace["error"] = str(e)[:300]
-            status = 429 if "429" in str(e) else 403 if "403" in str(e) else 500
-            acct_pool.release(account, success=False, status_code=status)
-        finally:
-            # 6. Session release
-            t0 = t()
-            account.release_session(session)
-            trace["steps"]["session_release"] = round((t() - t0) * 1000, 3)
-
-        # Compute totals
-        total = sum(v for v in trace["steps"].values() if isinstance(v, (int, float)))
-        trace["total_ms"] = round(total, 3)
-
-        # Breakdown: upstream vs overhead
-        http_ms = trace["steps"].get("http_request_total", 0)
-        overhead_ms = total - http_ms
-        trace["upstream_ms"] = round(http_ms, 3)
-        trace["overhead_ms"] = round(overhead_ms, 3)
-        trace["overhead_pct"] = round((overhead_ms / total * 100) if total > 0 else 0, 1)
-
-        results.append(trace)
-
-    # Summary across runs
-    summary = {}
-    valid = [r for r in results if "error" not in r]
-    if valid:
-        summary["runs"] = len(valid)
-        summary["avg_total_ms"] = round(sum(r["total_ms"] for r in valid) / len(valid), 1)
-        summary["avg_upstream_ms"] = round(sum(r["upstream_ms"] for r in valid) / len(valid), 1)
-        summary["avg_overhead_ms"] = round(sum(r["overhead_ms"] for r in valid) / len(valid), 1)
-
-        # Per-step averages
-        all_steps = {}
-        for r in valid:
-            for k, v in r["steps"].items():
-                if isinstance(v, (int, float)):
-                    all_steps.setdefault(k, []).append(v)
-        summary["avg_steps"] = {
-            k: round(sum(vals) / len(vals), 3)
-            for k, vals in sorted(all_steps.items(), key=lambda x: -sum(x[1]) / len(x[1]))
-        }
-
-        # Identify the bottleneck
-        top_step = max(summary["avg_steps"].items(), key=lambda x: x[1])
-        summary["bottleneck"] = {
-            "step": top_step[0],
-            "avg_ms": top_step[1],
-            "pct_of_total": round(top_step[1] / summary["avg_total_ms"] * 100, 1),
-        }
-
-    # DNS check — is api.x.com resolving fast?
-    t0 = time.perf_counter()
-    try:
-        ips = socket.getaddrinfo("api.x.com", 443, socket.AF_INET)
-        dns_ms = (time.perf_counter() - t0) * 1000
-        summary["dns_check"] = {
-            "host": "api.x.com",
-            "resolved_ips": list(set(a[4][0] for a in ips)),
-            "ms": round(dns_ms, 3),
-        }
-    except Exception as e:
-        summary["dns_check"] = {"error": str(e)}
-
-    # Account pool health
-    summary["account_pool"] = acct_pool.stats()
-
-    # Server info
-    summary["server"] = {
-        "region": os.environ.get("RAILWAY_REGION", os.environ.get("FLY_REGION", "unknown")),
-        "workers": os.environ.get("WORKERS", "?"),
-        "python": sys.version.split()[0],
-    }
-
-    return ORJSONResponse({
-        "runs": results,
-        "summary": summary,
-    })
 
 
 # Run with: uvicorn api.src.main:app --reload

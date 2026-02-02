@@ -141,3 +141,75 @@ def _parse_search_response(data: Dict[str, Any]) -> tuple[List[Tweet], Optional[
                     next_cursor = content.get("value")
 
     return tweets, next_cursor
+
+
+def _parse_search_response_raw(data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Extract raw tweet result dicts and cursor — no Tweet object creation."""
+    tweets = []
+    next_cursor = None
+
+    timeline = (
+        data.get("data", {})
+        .get("search_by_raw_query", {})
+        .get("search_timeline", {})
+        .get("timeline", {})
+    )
+
+    for instruction in timeline.get("instructions", []):
+        for entry in instruction.get("entries", []):
+            content = entry.get("content", {})
+            etype = content.get("entryType")
+
+            if etype == "TimelineTimelineItem":
+                result = (
+                    content.get("itemContent", {})
+                    .get("tweet_results", {})
+                    .get("result")
+                )
+                if result and result.get("__typename") != "TweetUnavailable":
+                    # Unwrap TweetWithVisibilityResults
+                    if result.get("__typename") == "TweetWithVisibilityResults":
+                        result = result.get("tweet", result)
+                    tweets.append(result)
+
+            elif etype == "TimelineTimelineCursor":
+                if content.get("cursorType") == "Bottom":
+                    next_cursor = content.get("value")
+
+    return tweets, next_cursor
+
+
+def search_tweets_raw(
+    query: str,
+    client: XClient,
+    count: int = 20,
+    product: str = "Top",
+    cursor: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], float]:
+    """
+    Search and return raw X API tweet dicts — no Tweet object parsing.
+
+    Returns:
+        Tuple of (raw_tweet_dicts, next_cursor, response_time_ms)
+    """
+    query_id = QUERY_IDS.get("SearchTimeline")
+    if not query_id:
+        raise ValueError("SearchTimeline query ID not configured")
+
+    variables = {
+        "rawQuery": query,
+        "count": count,
+        "querySource": "typed_query",
+        "product": product,
+    }
+    if cursor:
+        variables["cursor"] = cursor
+
+    data, elapsed_ms = client.graphql_request(
+        query_id=query_id,
+        operation_name="SearchTimeline",
+        variables=variables,
+        features=TWEET_FEATURES,
+    )
+    tweets, next_cursor = _parse_search_response_raw(data)
+    return tweets, next_cursor, elapsed_ms

@@ -36,31 +36,54 @@ TWEETS_SCHEMA = {
 }
 
 
-def _tweet_to_document(tweet_dict: dict) -> dict:
-    """Convert a tweet dict (from Tweet.to_dict()) to a Typesense document."""
-    # Parse created_at string to unix timestamp
+def _tweet_to_document(td: dict) -> dict:
+    """Convert a tweet dict (raw X API or legacy to_dict format) to a Typesense document."""
+    # Support both raw X API format and old to_dict() format
+    legacy = td.get("legacy") or {}
+    core = (td.get("core") or {}).get("user_results", {}).get("result", {})
+    user_legacy = core.get("legacy") or {}
+    user_core = core.get("core") or {}
+
+    # ID
+    tid = td.get("rest_id") or td.get("id") or legacy.get("id_str", "")
+
+    # Text
+    text = legacy.get("full_text") or td.get("text", "")
+
+    # Author
+    author_username = user_core.get("screen_name") or user_legacy.get("screen_name") or td.get("author_username", "")
+    author_name = user_core.get("name") or user_legacy.get("name") or td.get("author_name", "")
+    author_id = legacy.get("user_id_str") or core.get("rest_id") or td.get("author_id", "")
+
+    # Timestamp
     created_at_ts = 0
-    if raw := tweet_dict.get("created_at"):
+    raw_date = legacy.get("created_at") or td.get("created_at")
+    if raw_date:
         try:
             from email.utils import parsedate_to_datetime
-            created_at_ts = int(parsedate_to_datetime(raw).timestamp())
+            created_at_ts = int(parsedate_to_datetime(raw_date).timestamp())
         except Exception:
             pass
 
+    # Counts
+    views = td.get("views") or {}
+    view_raw = views.get("count")
+    view_count = int(view_raw) if view_raw else td.get("view_count", 0)
+
     return {
-        "id": str(tweet_dict.get("id", "")),
-        "text": tweet_dict.get("text", ""),
-        "author_username": tweet_dict.get("author_username", ""),
-        "author_name": tweet_dict.get("author_name", ""),
-        "author_id": str(tweet_dict.get("author_id", "")),
+        "id": str(tid),
+        "text": text,
+        "author_username": author_username,
+        "author_name": author_name,
+        "author_id": str(author_id),
         "created_at_ts": created_at_ts,
-        "like_count": tweet_dict.get("like_count", 0),
-        "retweet_count": tweet_dict.get("retweet_count", 0),
-        "view_count": tweet_dict.get("view_count", 0),
-        "language": tweet_dict.get("language", ""),
-        "is_reply": tweet_dict.get("is_reply", False),
-        "is_retweet": tweet_dict.get("is_retweet", False),
-        "is_quote": tweet_dict.get("is_quote", False),
+        "like_count": legacy.get("favorite_count") or td.get("like_count", 0),
+        "retweet_count": legacy.get("retweet_count") or td.get("retweet_count", 0),
+        "view_count": view_count,
+        "language": legacy.get("lang") or td.get("language", ""),
+        "is_reply": bool(legacy.get("in_reply_to_status_id_str")) if legacy else td.get("is_reply", False),
+        "is_retweet": bool(legacy.get("retweeted_status_result")) if legacy else td.get("is_retweet", False),
+        "is_quote": legacy.get("is_quote_status", False) if legacy else td.get("is_quote", False),
     }
 
 

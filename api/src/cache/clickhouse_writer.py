@@ -152,21 +152,28 @@ class ClickHouseWriter:
                 "is_reply", "is_retweet", "is_quote", "language",
             ]
             for td in batch:
+                # Support both raw X API format and old to_dict() format
+                legacy = td.get("legacy") or {}
+                core = (td.get("core") or {}).get("user_results", {}).get("result", {})
+                user_legacy = core.get("legacy") or {}
+                user_core = core.get("core") or {}
+                views = td.get("views") or {}
+                view_raw = views.get("count")
                 rows.append([
-                    str(td.get("id", "")),
-                    str(td.get("author_id", "")),
-                    td.get("author_username", ""),
-                    td.get("text", ""),
-                    td.get("like_count", 0),
-                    td.get("retweet_count", 0),
-                    td.get("reply_count", 0),
-                    td.get("quote_count", 0),
-                    td.get("view_count", 0),
-                    td.get("bookmark_count", 0),
-                    1 if td.get("is_reply") else 0,
-                    1 if td.get("is_retweet") else 0,
-                    1 if td.get("is_quote") else 0,
-                    td.get("language", ""),
+                    str(td.get("rest_id") or td.get("id") or legacy.get("id_str", "")),
+                    str(legacy.get("user_id_str") or core.get("rest_id") or td.get("author_id", "")),
+                    user_core.get("screen_name") or user_legacy.get("screen_name") or td.get("author_username", ""),
+                    legacy.get("full_text") or td.get("text", ""),
+                    legacy.get("favorite_count") or td.get("like_count", 0),
+                    legacy.get("retweet_count") or td.get("retweet_count", 0),
+                    legacy.get("reply_count") or td.get("reply_count", 0),
+                    legacy.get("quote_count") or td.get("quote_count", 0),
+                    int(view_raw) if view_raw else td.get("view_count", 0),
+                    legacy.get("bookmark_count") or td.get("bookmark_count", 0),
+                    1 if legacy.get("in_reply_to_status_id_str") or td.get("is_reply") else 0,
+                    1 if legacy.get("retweeted_status_result") or td.get("is_retweet") else 0,
+                    1 if legacy.get("is_quote_status") or td.get("is_quote") else 0,
+                    legacy.get("lang") or td.get("language", ""),
                 ])
             await asyncio.to_thread(
                 self._client.insert, "tweets", rows, column_names=columns,
