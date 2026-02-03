@@ -166,59 +166,50 @@ class CacheManager:
         fresh: bool = False,
     ) -> tuple[bytes, Optional[str], str]:
         """
-        Cache raw X API bytes. No JSON parse, no Typesense/ClickHouse.
+        Cache raw X API bytes. Single Redis call. No JSON parse.
         fetch_fn returns (raw_bytes, next_cursor).
         Returns (raw_bytes, next_cursor, cache_layer).
         """
         cache_key = make_key("searchraw", query, product, str(count), str(cursor or ""))
-        cursor_key = cache_key + ":cur"
 
         if fresh:
             raw_bytes, next_cursor = await fetch_fn()
             if raw_bytes:
-                asyncio.create_task(self._cache_raw(cache_key, cursor_key, raw_bytes, next_cursor))
+                asyncio.create_task(
+                    self.redis.set_raw(cache_key, raw_bytes, CacheConfig.TTL_SEARCH, cursor=next_cursor)
+                )
             return raw_bytes, next_cursor, "live"
 
-        # Redis L1
+        # Single Redis GET — data + cursor + timestamp all in one blob
         result = await self.redis.get_raw(cache_key)
         if result is not None:
-            cached_bytes, stored_at = result
+            cached_bytes, stored_at, nc = result
             age = time.time() - stored_at
-            # Grab cursor from companion key
-            cur_val = await self.redis._redis.get(cursor_key) if self.redis._redis else None
-            nc = cur_val.decode() if cur_val else None
             if age < CacheConfig.SWR_THRESHOLD:
                 return cached_bytes, nc, "redis"
-            asyncio.create_task(self._swr_refresh_raw(cache_key, cursor_key, fetch_fn))
+            asyncio.create_task(self._swr_refresh_raw(cache_key, fetch_fn))
             return cached_bytes, nc, "swr"
 
         # Cache miss — coalesce + stale-on-error
         try:
             (raw_bytes, next_cursor), coalesced = await self.coalescer.do(cache_key, fetch_fn)
             if not coalesced and raw_bytes:
-                asyncio.create_task(self._cache_raw(cache_key, cursor_key, raw_bytes, next_cursor))
+                asyncio.create_task(
+                    self.redis.set_raw(cache_key, raw_bytes, CacheConfig.TTL_SEARCH, cursor=next_cursor)
+                )
             return raw_bytes, next_cursor, "coalesced" if coalesced else "live"
         except Exception:
             stale = await self.redis.get_raw(cache_key)
             if stale is not None:
-                cached_bytes, _ = stale
-                cur_val = await self.redis._redis.get(cursor_key) if self.redis._redis else None
-                nc = cur_val.decode() if cur_val else None
+                cached_bytes, _, nc = stale
                 return cached_bytes, nc, "stale"
             raise
 
-    async def _cache_raw(self, key: str, cursor_key: str, raw_bytes: bytes, next_cursor: Optional[str]) -> None:
-        """Store raw bytes + cursor in Redis."""
-        await self.redis.set_raw(key, raw_bytes, CacheConfig.TTL_SEARCH)
-        if next_cursor and self.redis._redis:
-            await self.redis._redis.set(cursor_key, next_cursor.encode(), ex=CacheConfig.TTL_SEARCH)
-
-    async def _swr_refresh_raw(self, key: str, cursor_key: str,
+    async def _swr_refresh_raw(self, cache_key: str,
                                 fetch_fn: Callable[[], Awaitable[tuple[bytes, Optional[str]]]]) -> None:
-        """Background SWR refresh for raw search bytes."""
         try:
             raw_bytes, next_cursor = await fetch_fn()
-            await self._cache_raw(key, cursor_key, raw_bytes, next_cursor)
+            await self.redis.set_raw(cache_key, raw_bytes, CacheConfig.TTL_SEARCH, cursor=next_cursor)
         except Exception:
             pass
 

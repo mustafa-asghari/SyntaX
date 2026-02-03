@@ -103,22 +103,25 @@ class RedisCache:
             pipe.set(key, orjson.dumps(envelope), ex=ttl)
         await pipe.execute()
 
-    async def set_raw(self, key: str, data: bytes, ttl: int) -> None:
-        """Store raw bytes with 8-byte timestamp prefix — no JSON wrapping."""
+    async def set_raw(self, key: str, data: bytes, ttl: int,
+                      cursor: Optional[str] = None) -> None:
+        """Store raw bytes with header: 8-byte timestamp + 2-byte cursor length + cursor + data."""
         if not self._redis:
             return
-        ts = struct.pack("!d", time.time())  # 8 bytes, big-endian double
-        await self._redis.set(key, ts + data, ex=ttl)
+        cur_bytes = (cursor or "").encode()
+        header = struct.pack("!dH", time.time(), len(cur_bytes))  # 10 bytes
+        await self._redis.set(key, header + cur_bytes + data, ex=ttl)
 
-    async def get_raw(self, key: str) -> Optional[tuple[bytes, float]]:
-        """Get raw bytes + stored_at timestamp. Returns (data_bytes, stored_at) or None."""
+    async def get_raw(self, key: str) -> Optional[tuple[bytes, float, Optional[str]]]:
+        """Get raw bytes + stored_at + cursor. Returns (data, stored_at, cursor) or None."""
         if not self._redis:
             return None
         raw = await self._redis.get(key)
-        if raw is None or len(raw) < 8:
+        if raw is None or len(raw) < 10:
             return None
-        stored_at = struct.unpack("!d", raw[:8])[0]
-        return raw[8:], stored_at
+        stored_at, cur_len = struct.unpack("!dH", raw[:10])
+        cursor = raw[10:10 + cur_len].decode() if cur_len else None
+        return raw[10 + cur_len:], stored_at, cursor
 
     async def delete(self, key: str) -> None:
         if self._redis:

@@ -37,7 +37,6 @@ class Tweet:
     is_quote: bool
     media: List[Dict[str, Any]] = field(default_factory=list)
     urls: List[Dict[str, str]] = field(default_factory=list)
-    raw_json: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -65,6 +64,90 @@ class Tweet:
 # Cache dict.get for micro-optimization in hot paths
 _EMPTY_DICT: Dict[str, Any] = {}
 _EMPTY_LIST: List[Any] = []
+
+
+def parse_tweet_to_dict(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Parse tweet result directly to dict — skips Tweet dataclass for speed."""
+    if not result:
+        return None
+
+    typename = result.get("__typename")
+    if typename == "TweetUnavailable":
+        return None
+    if typename == "TweetWithVisibilityResults":
+        result = result.get("tweet") or result
+
+    legacy = result.get("legacy") or _EMPTY_DICT
+    core_results = result.get("core") or _EMPTY_DICT
+    user_results = core_results.get("user_results") or _EMPTY_DICT
+    core = user_results.get("result") or _EMPTY_DICT
+    user_core = core.get("core") or _EMPTY_DICT
+    user_legacy = core.get("legacy") or _EMPTY_DICT
+
+    views = result.get("views") or _EMPTY_DICT
+    view_count_raw = views.get("count")
+
+    # Build media list inline
+    media_list = []
+    ext_entities = legacy.get("extended_entities")
+    if ext_entities:
+        media_items = ext_entities.get("media")
+        if media_items:
+            for m in media_items:
+                mtype = m.get("type", "photo")
+                media_item = {
+                    "type": mtype,
+                    "url": m.get("media_url_https", ""),
+                }
+                if mtype in ("video", "animated_gif"):
+                    video_info = m.get("video_info")
+                    if video_info:
+                        variants = video_info.get("variants") or _EMPTY_LIST
+                        best_url = ""
+                        best_bitrate = -1
+                        for v in variants:
+                            if v.get("content_type") == "video/mp4":
+                                br = v.get("bitrate", 0)
+                                if br > best_bitrate:
+                                    best_bitrate = br
+                                    best_url = v.get("url", "")
+                        if best_url:
+                            media_item["video_url"] = best_url
+                media_list.append(media_item)
+
+    # Build URL list inline
+    url_list = []
+    entities = legacy.get("entities")
+    if entities:
+        urls = entities.get("urls")
+        if urls:
+            for u in urls:
+                url_list.append({
+                    "url": u.get("expanded_url") or u.get("url", ""),
+                    "display_url": u.get("display_url", ""),
+                })
+
+    return {
+        "id": legacy.get("id_str") or result.get("rest_id", ""),
+        "text": legacy.get("full_text", ""),
+        "created_at": legacy.get("created_at", ""),
+        "author_id": legacy.get("user_id_str") or core.get("rest_id", ""),
+        "author_username": user_core.get("screen_name") or user_legacy.get("screen_name", ""),
+        "author_name": user_core.get("name") or user_legacy.get("name", ""),
+        "retweet_count": legacy.get("retweet_count", 0),
+        "like_count": legacy.get("favorite_count", 0),
+        "reply_count": legacy.get("reply_count", 0),
+        "quote_count": legacy.get("quote_count", 0),
+        "view_count": int(view_count_raw) if view_count_raw else 0,
+        "bookmark_count": legacy.get("bookmark_count", 0),
+        "language": legacy.get("lang", ""),
+        "is_reply": bool(legacy.get("in_reply_to_status_id_str")),
+        "is_retweet": bool(legacy.get("retweeted_status_result")),
+        "is_quote": legacy.get("is_quote_status", False),
+        "media": media_list,
+        "urls": url_list,
+    }
+
 
 def _parse_tweet_result(result: Dict[str, Any]) -> Optional[Tweet]:
     """Parse a single tweet result object. Optimized for speed."""
@@ -142,10 +225,8 @@ def _parse_tweet_result(result: Dict[str, Any]) -> Optional[Tweet]:
             is_quote=legacy.get("is_quote_status", False),
             media=media_list,
             urls=url_list,
-            raw_json=result,
         )
-    except Exception as e:
-        print(f"Error parsing tweet: {e}")
+    except Exception:
         return None
 
 

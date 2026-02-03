@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List
 
 from client import XClient, token_set_from_account
 from config import QUERY_IDS, TWEET_FEATURES
-from endpoints.tweet import Tweet, _parse_tweet_result
+from endpoints.tweet import Tweet, _parse_tweet_result, parse_tweet_to_dict
 from account_pool import get_account_pool
 
 
@@ -141,6 +141,117 @@ def _parse_search_response(data: Dict[str, Any]) -> tuple[List[Tweet], Optional[
                     next_cursor = content.get("value")
 
     return tweets, next_cursor
+
+
+def _parse_search_response_fast(data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Parse search response directly to dicts — no Tweet dataclass overhead."""
+    tweets = []
+    next_cursor = None
+
+    timeline = (
+        data.get("data", {})
+        .get("search_by_raw_query", {})
+        .get("search_timeline", {})
+        .get("timeline", {})
+    )
+
+    for instruction in timeline.get("instructions", []):
+        for entry in instruction.get("entries", []):
+            content = entry.get("content", {})
+            etype = content.get("entryType")
+
+            if etype == "TimelineTimelineItem":
+                result = (
+                    content.get("itemContent", {})
+                    .get("tweet_results", {})
+                    .get("result")
+                )
+                if result:
+                    td = parse_tweet_to_dict(result)
+                    if td:
+                        tweets.append(td)
+
+            elif etype == "TimelineTimelineCursor":
+                if content.get("cursorType") == "Bottom":
+                    next_cursor = content.get("value")
+
+    return tweets, next_cursor
+
+
+def search_tweets_fast(
+    query: str,
+    client: XClient,
+    count: int = 20,
+    product: str = "Top",
+    cursor: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], float]:
+    """
+    Search and return parsed tweet dicts directly — no Tweet dataclass.
+    Fastest parsed path.
+
+    Returns:
+        Tuple of (tweet_dicts, next_cursor, response_time_ms)
+    """
+    query_id = QUERY_IDS.get("SearchTimeline")
+    if not query_id:
+        raise ValueError("SearchTimeline query ID not configured")
+
+    variables = {
+        "rawQuery": query,
+        "count": count,
+        "querySource": "typed_query",
+        "product": product,
+    }
+    if cursor:
+        variables["cursor"] = cursor
+
+    # If client is already authenticated, use it directly
+    if client.token_set and client.token_set.is_authenticated:
+        data, elapsed_ms = client.graphql_request(
+            query_id=query_id,
+            operation_name="SearchTimeline",
+            variables=variables,
+            features=TWEET_FEATURES,
+        )
+        tweets, next_cursor = _parse_search_response_fast(data)
+        return tweets, next_cursor, elapsed_ms
+
+    # Guest token — need an authenticated account from the pool
+    pool = get_account_pool()
+    account = pool.acquire() if pool.has_accounts else None
+
+    if not account:
+        return [], None, 0.0
+
+    auth_ts = token_set_from_account(account)
+    session = account.acquire_session()
+    auth_client = XClient(
+        token_set=auth_ts,
+        proxy=account.proxy_dict,
+        session=session,
+    )
+
+    try:
+        data, elapsed_ms = auth_client.graphql_request(
+            query_id=query_id,
+            operation_name="SearchTimeline",
+            variables=variables,
+            features=TWEET_FEATURES,
+        )
+        pool.release(account, success=True, status_code=200)
+        tweets, next_cursor = _parse_search_response_fast(data)
+        return tweets, next_cursor, elapsed_ms
+    except Exception as e:
+        status = 404
+        if "429" in str(e):
+            status = 429
+        elif "403" in str(e):
+            status = 403
+        pool.release(account, success=False, status_code=status)
+        raise
+    finally:
+        auth_client.close()
+        account.release_session(session)
 
 
 import re
