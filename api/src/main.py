@@ -18,13 +18,13 @@ from pydantic import BaseModel
 # Add scraper/src to path so absolute imports (from config, from client, etc.) work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper', 'src'))
 
-from scraper.src.client import XClient, create_token_set
-from scraper.src.token_pool import get_pool, AnyTokenPool
-from scraper.src.proxy_manager import get_proxy_manager
-from scraper.src.endpoints.user import get_user_by_username, get_user_by_id
-from scraper.src.endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
-from scraper.src.endpoints.search import search_tweets_fast
-from scraper.src.endpoints.social import get_followers, get_following
+from client import XClient, create_token_set
+from token_pool import get_pool, AnyTokenPool
+from proxy_manager import get_proxy_manager
+from endpoints.user import get_user_by_username, get_user_by_id
+from endpoints.tweet import get_tweet_by_id, get_tweet_detail, get_user_tweets
+from endpoints.search import search_tweets_fast
+from endpoints.social import get_followers, get_following
 
 # Add api/src to path for cache package imports
 sys.path.insert(0, os.path.dirname(__file__))
