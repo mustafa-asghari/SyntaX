@@ -10,10 +10,19 @@ import time
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
+import orjson
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+
+class PrettyORJSONResponse(Response):
+    """ORJSONResponse with 2-space indentation for readability."""
+    media_type = "application/json"
+
+    def render(self, content) -> bytes:
+        return orjson.dumps(content, option=orjson.OPT_INDENT_2)
 
 # Add scraper/src to path so absolute imports (from config, from client, etc.) work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scraper', 'src'))
@@ -216,6 +225,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def pretty_json_middleware(request: Request, call_next):
+    """Reformat JSON with indentation if ?pretty=true is in query string."""
+    response = await call_next(request)
+
+    if request.query_params.get("pretty") == "true":
+        if response.headers.get("content-type", "").startswith("application/json"):
+            body = b""
+            async for chunk in response.body_iterator:
+                body += chunk
+            try:
+                data = orjson.loads(body)
+                pretty_body = orjson.dumps(data, option=orjson.OPT_INDENT_2)
+                return Response(
+                    content=pretty_body,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type="application/json",
+                )
+            except Exception:
+                pass  # Return original if parsing fails
+
+    return response
 
 
 @app.get("/")

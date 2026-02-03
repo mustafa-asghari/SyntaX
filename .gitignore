@@ -28,3 +28,5 @@ GUEST_SCALING_PLAN.md
 SCRAPER_SPEED_MAX.md
 
 bench_api_v2.py
+
+result.json
