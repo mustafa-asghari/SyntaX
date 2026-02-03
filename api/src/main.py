@@ -240,10 +240,15 @@ async def pretty_json_middleware(request: Request, call_next):
             try:
                 data = orjson.loads(body)
                 pretty_body = orjson.dumps(data, option=orjson.OPT_INDENT_2)
+                # Exclude content-length from original headers (will be recalculated)
+                new_headers = {
+                    k: v for k, v in response.headers.items()
+                    if k.lower() != "content-length"
+                }
                 return Response(
                     content=pretty_body,
                     status_code=response.status_code,
-                    headers=dict(response.headers),
+                    headers=new_headers,
                     media_type="application/json",
                 )
             except Exception:
