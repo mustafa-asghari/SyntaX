@@ -230,31 +230,38 @@ app.add_middleware(
 @app.middleware("http")
 async def pretty_json_middleware(request: Request, call_next):
     """Reformat JSON with indentation if ?pretty=true is in query string."""
+    # Skip pretty handling if not requested
+    if request.query_params.get("pretty") != "true":
+        return await call_next(request)
+
     response = await call_next(request)
 
-    if request.query_params.get("pretty") == "true":
-        if response.headers.get("content-type", "").startswith("application/json"):
-            body = b""
-            async for chunk in response.body_iterator:
-                body += chunk
-            try:
-                data = orjson.loads(body)
-                pretty_body = orjson.dumps(data, option=orjson.OPT_INDENT_2)
-                # Exclude content-length from original headers (will be recalculated)
-                new_headers = {
-                    k: v for k, v in response.headers.items()
-                    if k.lower() != "content-length"
-                }
-                return Response(
-                    content=pretty_body,
-                    status_code=response.status_code,
-                    headers=new_headers,
-                    media_type="application/json",
-                )
-            except Exception:
-                pass  # Return original if parsing fails
+    # Only process JSON responses
+    content_type = response.headers.get("content-type", "")
+    if not content_type.startswith("application/json"):
+        return response
 
-    return response
+    # Read body and re-serialize with indentation
+    body_parts = []
+    async for chunk in response.body_iterator:
+        body_parts.append(chunk)
+    body = b"".join(body_parts)
+
+    try:
+        data = orjson.loads(body)
+        pretty_body = orjson.dumps(data, option=orjson.OPT_INDENT_2)
+        return Response(
+            content=pretty_body,
+            status_code=response.status_code,
+            media_type="application/json",
+        )
+    except Exception:
+        # Return original body if parsing fails
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            media_type="application/json",
+        )
 
 
 @app.get("/")
